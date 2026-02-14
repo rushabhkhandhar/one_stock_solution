@@ -1,3 +1,31 @@
-beautifulsoup4==4.14.3
-pandas==2.2.3
-requests==2.31.0
+# ══════════════════════════════════════════════════════════
+#  Advanced Equity Research System — Dependencies
+# ══════════════════════════════════════════════════════════
+
+# ── Core: Scraping & Data ────────────────────────────────
+beautifulsoup4>=4.14
+requests>=2.31
+pandas>=2.2
+numpy>=2.0
+lxml>=6.0
+
+# ── Core: PDF Parsing (free, no API keys) ────────────────
+PyMuPDF>=1.26
+pdfplumber>=0.11
+
+# ── Step 1: External Market Feeds ────────────────────────
+yfinance>=1.1                 # Nifty50, FII/DII, macro proxies
+
+# ── Step 2: Quantitative Engine ──────────────────────────
+statsmodels>=0.14             # ARIMA / ARIMAX, statistical tests
+scikit-learn>=1.6             # Preprocessing, peer clustering
+
+# ── Step 3: Qualitative NLP & Sentiment ──────────────────
+transformers>=4.57            # FinBERT sentiment analysis
+torch>=2.8                    # PyTorch backend
+sentence-transformers>=5.1    # Dense embeddings for RAG
+rank-bm25>=0.2                # Sparse BM25 search for RAG
+
+# ── Transitive (auto-installed) ──────────────────────────
+# scipy, sympy, huggingface-hub, tokenizers, safetensors,
+# tqdm, regex, PyYAML, Jinja2, joblib, fsspec, etc.

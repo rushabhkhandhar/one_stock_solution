@@ -78,14 +78,24 @@ class stockScreener():
         else: 
             raise Exception("Unable to find screener ID")
     
-    def requestAPI(self, method, url, content = False):
-        resp = self.reqSession.request(method, url, headers =self.headers)
-        if resp.status_code == 200 : 
-            if content : 
-                return resp.content
-            else: 
-                resp = resp.json()
-                return resp
+    def requestAPI(self, method, url, content = False, maxRetries=3):
+        for attempt in range(maxRetries):
+            resp = self.reqSession.request(method, url, headers=self.headers)
+            if resp.status_code == 200:
+                if content:
+                    return resp.content
+                else:
+                    try:
+                        resp = resp.json()
+                        return resp
+                    except:
+                        return None
+            elif resp.status_code == 429:
+                wait = 2 ** attempt
+                time.sleep(wait)
+            else:
+                return None
+        return None
     
     def getEndpoint(self, section):
         sections = {"quarters" : "quarterlyReport",
@@ -143,7 +153,11 @@ class stockScreener():
                     pass
                 else: 
                     url = self.baseurl + self.endpoints[section][tag].format(screenerID = self.screenerID, consolidated=self.__consoltag)
+                time.sleep(0.5)
                 resp = self.requestAPI("GET", url)
+                if resp is None:
+                    print(f"Warning: No data received for {tag} in {section}")
+                    continue
                 for key in resp : 
                     _key = key.replace(" ", "")#.replace("%", "") 
                     values = resp[key]
@@ -286,16 +300,66 @@ class stockScreener():
                 return resp
         
     def concallTranscript(self):
-        content = self.soup.find_all(class_="concall-link")
+        """
+        Extract concall transcript PDF links from Screener.in.
+        
+        DOM structure (as of 2025):
+        <li class="flex flex-gap-8 flex-wrap-420">
+          <div class="ink-600 font-size-15 ...">Jan 2026</div>
+          <a class="concall-link" href="https://..." title="Raw Transcript">Transcript</a>
+          <button class="concall-link ...">AI Summary</button>
+          <div class="concall-link">PPT</div>
+        </li>
+        
+        Returns dict: { "YYYY-MM-DD": "https://bseindia.com/..." }
+        """
         data = {}
-        print(len(content))
-        for item in content:
-            date_text = item.find('div', class_='ink-600 font-size-15 font-weight-500 nowrap').text.strip()
-            transcript_link = item.find('a', class_='concall-link', title='Raw Transcript')
-            # if transcript_link:
-            dta = str(datetime.datetime.strptime(date_text, "%b %Y").date())
-            print(dta)
-            data[dta] = transcript_link['href']
+
+        # Find all <a> tags that have title="Raw Transcript" or text "Transcript"
+        all_links = self.soup.find_all('a', href=True)
+        transcript_links = []
+        for link in all_links:
+            title = (link.get('title') or '').lower()
+            text = link.get_text(strip=True).lower()
+            if 'transcript' in title or text == 'transcript':
+                transcript_links.append(link)
+
+        for link in transcript_links:
+            try:
+                href = link.get('href', '')
+                if not href:
+                    continue
+
+                # Date is in a sibling <div> inside the same parent <li>
+                parent = link.parent
+                if not parent:
+                    continue
+
+                date_div = parent.find('div', class_=re.compile(r'ink-600'))
+                if not date_div:
+                    # Fallback: any div with font-weight in class
+                    date_div = parent.find('div', class_=re.compile(r'font-weight'))
+                if not date_div:
+                    # Fallback: previous sibling element
+                    prev = link.find_previous_sibling('div')
+                    if prev:
+                        date_div = prev
+
+                if date_div:
+                    date_text = date_div.get_text(strip=True)
+                    try:
+                        dta = str(datetime.datetime.strptime(date_text, "%b %Y").date())
+                        # Only keep the first link per date (avoid duplicates)
+                        if dta not in data:
+                            data[dta] = href
+                    except ValueError:
+                        # If date doesn't parse, use a counter key
+                        key = f"unknown_{len(data)}"
+                        data[key] = href
+            except Exception:
+                continue
+
+        print(f"  Found {len(data)} concall transcripts with links")
         return data
 
 class ScreenerScrape(stockScreener):
