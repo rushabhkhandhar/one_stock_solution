@@ -185,10 +185,29 @@ class SayDoTracker:
             }
 
         # ── Step 3: Calculate overall Say-Do ratio ──────────
-        # Ratio = (# guidance items delivered) / (# tracked)
+        # Rule 5: Apply exponential time-decay weighting.
+        # Recent quarters get much higher weight than older ones.
+        # weight = exp(-decay * quarter_offset)  where decay = 0.5
+        import math
+        _DECAY = 0.5
+
+        _weighted_met = 0.0
+        _weighted_total = 0.0
+        for item in comparison_items:
+            _offset = item.get('quarter_offset', 1)
+            _w = math.exp(-_DECAY * max(_offset - 1, 0))
+            _weighted_total += _w
+            if item['met']:
+                _weighted_met += _w
+
+        # Weighted ratio (gives recent quarters 2-3× more influence)
+        overall_ratio = (_weighted_met / _weighted_total
+                         if _weighted_total > 0 else 0.0)
+
+        # Also keep the simple unweighted metric for transparency
         met_count = sum(1 for item in comparison_items if item['met'])
         met_pct = met_count / len(comparison_items) * 100
-        overall_ratio = met_count / len(comparison_items)
+        unweighted_ratio = met_count / len(comparison_items)
 
         # Credibility rating — based on delivery rate
         if overall_ratio >= 0.9:
@@ -216,6 +235,7 @@ class SayDoTracker:
         return {
             'available': True,
             'say_do_ratio': round(overall_ratio, 3),
+            'unweighted_ratio': round(unweighted_ratio, 3),
             'met_pct': round(met_pct, 1),
             'num_guidances_found': len(prior_guidances),
             'num_matched': len(comparison_items),
@@ -226,6 +246,7 @@ class SayDoTracker:
             'credibility_rating': credibility,
             'assessment': assessment,
             'is_governance_risk': is_governance_risk,
+            'time_decay_applied': True,
         }
 
     # ==================================================================

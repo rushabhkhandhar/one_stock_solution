@@ -95,6 +95,24 @@ class ESGAnalyzer:
         ),
     ]
 
+    # Rule 6: Green-transition keyword patterns — detect forward-
+    # looking green CapEx even when current ESG score is low.
+    GREEN_TRANSITION_PATTERNS = [
+        re.compile(r'green\s+hydrogen|green\s+H[₂2]', re.IGNORECASE),
+        re.compile(r'electric\s+vehicle|EV\s+(?:fleet|transition|rollout)',
+                   re.IGNORECASE),
+        re.compile(r'circular\s+economy', re.IGNORECASE),
+        re.compile(r'green\s+bond', re.IGNORECASE),
+        re.compile(r'renewable\s+(?:energy\s+)?transition', re.IGNORECASE),
+        re.compile(r'solar\s+(?:power|plant|capacity|rooftop)', re.IGNORECASE),
+        re.compile(r'battery\s+(?:storage|energy|gigafactory)', re.IGNORECASE),
+        re.compile(r'wind\s+(?:energy|farm|turbine)', re.IGNORECASE),
+        re.compile(r'sustainability\s+linked\s+(?:loan|bond)', re.IGNORECASE),
+        re.compile(r'zero\s+(?:waste|discharge|liquid)', re.IGNORECASE),
+        re.compile(r'biodiversity|afforestation|carbon\s+capture',
+                   re.IGNORECASE),
+    ]
+
     def analyze(self, ar_parsed: dict, pdf_path: str = None) -> dict:
         """
         Extract ESG/BRSR metrics from annual report.
@@ -179,6 +197,41 @@ class ESGAnalyzer:
             score += 1
 
         result['esg_score'] = min(score, 10)
+
+        # ── Rule 6: Green-transition modifier ──
+        # Scan for forward-looking green CapEx keywords even when
+        # the current absolute ESG score is low (bottom-decile).
+        green_hits = []
+        for pat in self.GREEN_TRANSITION_PATTERNS:
+            for m in pat.finditer(brsr_text):
+                start = max(0, m.start() - 40)
+                end = min(len(brsr_text), m.end() + 80)
+                snippet = brsr_text[start:end].replace('\n', ' ').strip()
+                green_hits.append(snippet)
+        # De-duplicate very similar hits
+        _seen = set()
+        _unique_hits = []
+        for h in green_hits:
+            _key = h[:50].lower()
+            if _key not in _seen:
+                _seen.add(_key)
+                _unique_hits.append(h)
+        result['green_transition_keywords'] = _unique_hits[:8]
+
+        # Transition Phase: ESG ≤ 4 but green CapEx evidence present
+        _esg = result['esg_score']
+        if _esg <= 4 and len(_unique_hits) >= 1:
+            result['transition_phase'] = True
+            result['transition_reason'] = (
+                f'ESG score {_esg}/10 is bottom-decile but '
+                f'{len(_unique_hits)} green-transition keyword(s) '
+                f'detected in BRSR/AR text, suggesting active '
+                f'decarbonisation CapEx. Score reflects legacy '
+                f'footprint, not forward intent.')
+            # Modest score uplift: +1 for demonstrable transition
+            result['esg_score'] = min(_esg + 1, 10)
+        else:
+            result['transition_phase'] = False
 
         return result
 

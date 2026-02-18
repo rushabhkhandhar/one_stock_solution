@@ -306,16 +306,24 @@ class ForensicDashboard:
             increase = latest_dd - prev_dd
 
             is_red = increase > 15  # >15 day increase is concerning
+            detail_str = f'Debtor days changed by {increase:+.0f} days — '
+            if is_red:
+                detail_str += (
+                    'significant increase may suggest channel stuffing '
+                    'or collection issues. NOTE: For companies with '
+                    'substantial defense / government contracting '
+                    'revenue, protracted milestone-based billing '
+                    '(120-180 day cycles) is structural — verify '
+                    'revenue mix before concluding manipulation.')
+            else:
+                detail_str += 'stable receivables collection'
             return {
                 'name': 'Revenue-Receivables Divergence',
                 'value': f'{latest_dd:.0f} days (Δ{increase:+.0f})',
                 'threshold': 'Δ Debtor Days < +15',
                 'pass': not is_red,
                 'is_red_flag': is_red,
-                'detail': (f'Debtor days changed by {increase:+.0f} days — '
-                           + ('significant increase suggests potential channel '
-                              'stuffing or collection issues' if is_red
-                              else 'stable receivables collection')),
+                'detail': detail_str,
             }
 
         # Revenue growth vs receivables growth (from P&L)
@@ -369,6 +377,20 @@ class ForensicDashboard:
         """Check contingent liabilities exposure."""
         cl = analysis.get('contingent', {})
         if cl.get('available'):
+            # If the extractor flagged a data-quality issue,
+            # treat as SKIP rather than a real pass/fail.
+            if cl.get('data_quality_issue'):
+                return {
+                    'name': 'Contingent Liabilities',
+                    'value': 'Data quality issue',
+                    'threshold': 'CL < 20% of net worth',
+                    'pass': None,  # SKIP — data unreliable
+                    'is_red_flag': False,
+                    'severity': 'DATA_QUALITY',
+                    'detail': cl.get('detail',
+                                     'Extracted figure implausible — verify '
+                                     'against audited filings'),
+                }
             severity = cl.get('severity', 'UNKNOWN')
             pct = cl.get('contingent_as_pct_networth')
             is_red = severity in ('HIGH', 'CRITICAL')

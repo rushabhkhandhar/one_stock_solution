@@ -11,7 +11,7 @@ Produces a professional, 360-degree Markdown report:
   7.  Forensic Analysis (M-Score)
   8.  Financial Health (F-Score)
   9.  Shareholding Pattern
-  10. Qualitative Intelligence (Sentiment, Mgmt Tracker)
+  10. Text Intelligence (Document Extraction)
   11. Predictive Model (Price Forecast)
   12. Market Correlation & Relative Strength
   13. Data Validation — Annual Report Cross-Check
@@ -38,8 +38,8 @@ class ReportGenerator:
         import re as _re
         # Clean transcript noise before truncating
         try:
-            from qualitative.rag_engine import RAGEngine
-            text = RAGEngine.clean_transcript_noise(text)
+            from qualitative.text_intelligence import clean_transcript_noise
+            text = clean_transcript_noise(text)
         except Exception:
             pass
         text = text.strip()
@@ -177,6 +177,10 @@ class ReportGenerator:
             a(f"| {label} | {display} |")
         a("")
 
+        # Show EPS corporate-action adjustment note if detected
+        if ratios.get('eps_adjusted'):
+            a(f"> ℹ️ **EPS Adjusted:** {ratios.get('eps_adjustment_reason', 'Corporate action detected.')}\n")
+
         # ── 5-Year Trend Analysis (NEW) ─────────────────────
         if trends.get('available'):
             a("## 📈 5-Year Trend Analysis\n")
@@ -196,6 +200,8 @@ class ReportGenerator:
                              'FLAT': 'FLAT'}.get(m.get('direction', ''), 'FLAT')
                     cagr = f"{m['cagr_5y']:+.1f}%" if m.get('cagr_5y') is not None else 'N/A'
                     accel = m.get('acceleration', '—')
+                    if accel == 'DECELERATING_CORP_ACTION':
+                        accel = '⚠️ CORP ACTION'
                     val = m.get('latest', 0)
                     if m.get('is_pure_ratio'):
                         # D/E etc. — show as multiple, not %
@@ -276,12 +282,63 @@ class ReportGenerator:
                 a("> ⚠️ *Linear projections — actual results depend on "
                   "market conditions, management execution, and macro factors.*\n")
 
+            # Corporate-action context note
+            if trends.get('corp_action_detected'):
+                _ca_yr = trends.get('corp_action_year', '?')
+                _ca_metrics = [m for m in metrics
+                               if m.get('acceleration') == 'DECELERATING_CORP_ACTION']
+                if _ca_metrics:
+                    _ca_names = ', '.join(m['label'] for m in _ca_metrics[:4])
+                    a(f"> ℹ️ *Corporate Action Detected ({_ca_yr}): "
+                      f"Shares outstanding expanded >80%, indicating "
+                      f"a likely stock split, bonus issue, or merger. "
+                      f"{_ca_names} show deceleration that is partially "
+                      f"or wholly attributable to per-share dilution "
+                      f"rather than fundamental business deterioration. "
+                      f"Evaluate absolute revenue / profit growth "
+                      f"alongside per-share metrics.*\n")
+
+            # Deceleration analyst context
+            _decel_metrics = [m for m in metrics
+                              if m.get('acceleration') == 'DECELERATING']
+            if len(_decel_metrics) >= 2:
+                _decel_names = ', '.join(
+                    m['label'] for m in _decel_metrics[:4])
+                # Check if revenue is large (> ₹50,000 Cr = mature base)
+                _rev_m = next((m for m in metrics
+                               if m.get('label') == 'Revenue'), {})
+                _rev_latest = _rev_m.get('latest', 0)
+                if _rev_latest > 50000:
+                    a(f"> 💡 *Analyst Note: {_decel_names} show "
+                      f"decelerating growth — this is mathematically "
+                      f"expected for a company at ₹{_rev_latest:,.0f} Cr "
+                      f"annual revenue. Maintaining historical hyper-"
+                      f"growth CAGRs becomes physically impossible at "
+                      f"this scale (base effect). Investors should "
+                      f"recalibrate: the transition from high-growth "
+                      f"disruptor to steady-state cash-generating "
+                      f"compounder is a sign of maturity, not "
+                      f"deterioration.*\n")
+                else:
+                    a(f"> ⚠️ *{_decel_names} show decelerating "
+                      f"growth. If this deceleration persists across "
+                      f"multiple quarters, it may signal competitive "
+                      f"pressure or demand softening rather than a "
+                      f"temporary blip.*\n")
+
         # ── DCF Valuation ────────────────────────────────────
         a("## 💰 Valuation Analysis — DCF Model\n")
         if is_suspended:
             a("> ⚠️ **DCF BYPASSED** — Data Trust Score is below reliability "
               "threshold. DCF model generation is bypassed to prevent "
               "misleading valuation outputs.\n")
+        elif dcf.get('sector_skip'):
+            a(f"> ℹ️ **DCF Model Skipped** — {dcf.get('reason', 'Financial-sector company detected.')}\n")
+            a("> 💡 *For banks, NBFCs, and insurance companies, standard "
+              "FCFF/FCFE-based DCF is structurally inapplicable because "
+              "deposits and float constitute operational liabilities, not "
+              "financing. Use Price/Book, Residual Income (excess-ROE), "
+              "or Dividend Discount Model (DDM) for intrinsic valuation.*\n")
         elif dcf.get('available'):
             dcf_mismatch = dcf.get('dcf_ev_mismatch', False)
 
@@ -311,7 +368,7 @@ class ReportGenerator:
               f"{f'₹{_pv_tv:,.2f} Cr' if _pv_tv is not None else 'N/A'} |")
             a(f"| 3 | **Enterprise Value (DCF)** | "
               f"**₹{dcf['enterprise_value']:,.2f} Cr** |")
-            a(f"| 4a | − Net Debt | ₹{dcf['net_debt']:,.2f} Cr |")
+            a(f"| 4a | - Net Debt | ₹{dcf['net_debt']:,.2f} Cr |")
             a(f"| 4b | = Equity Value | ₹{dcf['equity_value']:,.2f} Cr |")
             a(f"| 4c | ÷ Shares Outstanding | {dcf['shares_cr']:.2f} Cr |")
             if dcf_mismatch:
@@ -352,6 +409,27 @@ class ReportGenerator:
                   f"{_cfg2.validation.dcf_ev_threshold_pct:.0f}% sanity threshold. "
                   "Target Price has been overridden to **N/A**. "
                   "Manual review of WACC and Growth Rate inputs is required.\n")
+                a("> 💡 *Analyst Note: While the DCF model may fail to "
+                  "capture non-linear growth pivots (e.g. manufacturing "
+                  "hyper-scaling), an extreme EV mismatch also signals "
+                  "that the equity is priced for perfection with little "
+                  "margin of safety. Investors should consider P/E, P/B, "
+                  "and EV/EBITDA multiples relative to the sector median "
+                  "to assess whether current premiums are justified.*\n")
+                # Additional context: CapEx cycle and SOTP
+                _sotp_avail = analysis.get('sotp', {}).get('available', False)
+                if _sotp_avail:
+                    a("> 💡 *For diversified conglomerates in a "
+                      "peak capital-expenditure cycle, linear DCF "
+                      "models systematically undervalue the business "
+                      "because elevated CapEx depresses current Free "
+                      "Cash Flow — the very baseline the algorithm "
+                      "extrapolates. The market typically values such "
+                      "companies using a Sum-of-the-Parts (SOTP) "
+                      "methodology, pricing each vertical on future "
+                      "earnings potential rather than present "
+                      "depressed FCF. Refer to the SOTP section for "
+                      "a more appropriate valuation framework.*\n")
             a("")
             # Projected FCFs
             proj = dcf.get('projected_fcf', [])
@@ -362,6 +440,17 @@ class ReportGenerator:
                 val_row = "| " + " | ".join(f"{f:,.0f}" for f in proj) + " |"
                 a(hdr); a(sep); a(val_row)
             a("")
+
+            # Peak CapEx warning
+            if dcf.get('peak_capex'):
+                _cr = dcf.get('capex_ocf_ratio', 0)
+                a(f"> ⚠️ **Peak CapEx Cycle Detected** — CapEx/OCF ratio "
+                  f"at {_cr:.0%}, indicating the company is investing "
+                  f"a disproportionate share of operating cash flow. "
+                  f"The DCF baseline is structurally depressed; "
+                  f"as capacity comes online and CapEx normalises, "
+                  f"FCF should expand materially. Treat the current "
+                  f"intrinsic value as a floor estimate.\n")
 
             # WACC Sensitivity Grid
             sens = dcf.get('sensitivity', {})
@@ -536,7 +625,8 @@ class ReportGenerator:
                 'LVGI': 'Leverage Index',
             }
             for k, v in ms.get('components', {}).items():
-                a(f"| {k} | {v:.4f} | {DESC.get(k, '')} |")
+                _v_str = f"{v:.4f}" if isinstance(v, (int, float)) else 'N/A'
+                a(f"| {k} | {_v_str} | {DESC.get(k, '')} |")
             a("")
             a(f"> **Threshold:** M > {ms['thresholds']['manipulation_likely']}"
               f" → Likely manipulation  ·  "
@@ -596,6 +686,34 @@ class ReportGenerator:
                 a(f"| {cat_display} | {cur} | {prv} | {delta} |")
             a("")
 
+            # ── Institutional concentration analysis ─────────
+            # Detect "smart money" vacuum and flag retail-heavy float
+            _fii_cur = None
+            _dii_cur = None
+            _retail_cur = None
+            for cat, vals in shp.items():
+                if cat == 'PromoterPledging':
+                    continue
+                _c = vals.get('current')
+                if not isinstance(_c, (int, float)):
+                    continue
+                _cat_lc = cat.lower()
+                if 'fii' in _cat_lc or 'fpi' in _cat_lc:
+                    _fii_cur = _c
+                elif 'dii' in _cat_lc:
+                    _dii_cur = _c
+                elif 'public' in _cat_lc or 'retail' in _cat_lc:
+                    _retail_cur = _c
+            if (_fii_cur is not None and _dii_cur is not None
+                    and _fii_cur + _dii_cur < 5
+                    and _retail_cur is not None and _retail_cur > 30):
+                a("> ⚠️ *Institutional Concentration Alert:* FII "
+                  f"({_fii_cur:.1f}%) + DII ({_dii_cur:.1f}%) combined "
+                  f"is under 5%, while retail float sits at "
+                  f"{_retail_cur:.1f}%. This 'smart money' vacuum "
+                  "increases susceptibility to high-beta volatility "
+                  "during broader market corrections.\n")
+
             # Promoter Pledging
             pledge = shp.get('PromoterPledging', {})
             if pledge:
@@ -611,6 +729,12 @@ class ReportGenerator:
                 if pledge.get('is_red_flag'):
                     a(f"\n> ⚠️ **Red Flag:** Promoter pledging exceeds 20% — "
                       f"risk of forced liquidation in market downturn.\n")
+                    a("> 💡 *Analyst Note: Pledged promoter shares "
+                      "introduce asymmetric downside risk. In a severe "
+                      "market correction, margin calls on pledged shares "
+                      "can force involuntary liquidations, accelerating "
+                      "downward price pressure in a self-reinforcing "
+                      "cycle. Monitor pledge levels quarterly.*\n")
                 a("")
 
         # ── Forensic Deep Dive (RPT, Contingent, Auditor) ────
@@ -635,17 +759,61 @@ class ReportGenerator:
                 cats = rpt.get('categories', [])
                 if cats:
                     a(f"**RPT Categories:** {', '.join(cats)}\n")
+                # Analyst context: RPTs in multi-subsidiary groups
+                # are often standard operational flows, not tunneling.
+                rpt_pct = rpt.get('rpt_as_pct_revenue')
+                if rpt_pct is not None and rpt_pct <= 25:
+                    a("> 💡 *Analyst Note: RPTs at this level in "
+                      "multi-subsidiary groups typically represent "
+                      "standard inter-company service agreements "
+                      "monitored by the Audit Committee on an "
+                      "arm's-length basis, rather than wealth "
+                      "tunneling.*\n")
+                elif rpt_pct is not None and rpt_pct > 50:
+                    # Detect conglomerate / holding-company structure:
+                    # SOTP available OR multiple business segments.
+                    _sotp_avail = analysis.get('sotp', {}).get('available', False)
+                    _seg_count = len(analysis.get('sotp', {}).get(
+                        'segment_valuations', []))
+                    _segmental = analysis.get('segmental', {})
+                    if not _seg_count:
+                        _seg_count = len(_segmental.get('segments', []))
+                    if _sotp_avail or _seg_count >= 3:
+                        a("> 💡 *Analyst Note: For diversified holding "
+                          "companies with multiple operating "
+                          "subsidiaries, gross standalone intra-group "
+                          "transactions (e.g. parent company "
+                          "buying/selling to wholly-owned subs) "
+                          "aggregate to seemingly large RPT figures. "
+                          "In audited **consolidated** financials, "
+                          "these inter-company transactions are "
+                          "eliminated on consolidation and do not "
+                          "represent wealth-tunneling. Evaluate "
+                          "RPT quality by reviewing the Audit "
+                          "Committee's arm's-length certification "
+                          "in the Annual Report.*\n")
 
             # Contingent Liabilities
             if contingent.get('available'):
                 a("### Contingent Liabilities\n")
-                a(f"| Metric | Value |")
-                a(f"|--------|------:|")
-                if contingent.get('total_contingent'):
-                    a(f"| Total Contingent | ₹{contingent['total_contingent']:,.0f} Cr |")
-                if contingent.get('contingent_as_pct_networth') is not None:
-                    a(f"| As % of Net Worth | {contingent['contingent_as_pct_networth']}% |")
-                a(f"| Severity | {contingent.get('severity', 'N/A')} |")
+                # ── Data-quality guard: if the extractor flagged the
+                #    figure as implausible (e.g. >150 % of net worth),
+                #    surface the warning rather than the raw number.
+                if contingent.get('data_quality_issue'):
+                    a("> ⚠️ **DATA QUALITY ISSUE** — The automated text "
+                      "extractor returned an implausibly large contingent "
+                      f"liability figure (₹{contingent.get('total_contingent', 0):,.0f} Cr). "
+                      "This is almost certainly a parsing artefact. "
+                      "Cross-check against audited filings before relying "
+                      "on this figure.\n")
+                else:
+                    a(f"| Metric | Value |")
+                    a(f"|--------|------:|")
+                    if contingent.get('total_contingent'):
+                        a(f"| Total Contingent | ₹{contingent['total_contingent']:,.0f} Cr |")
+                    if contingent.get('contingent_as_pct_networth') is not None:
+                        a(f"| As % of Net Worth | {contingent['contingent_as_pct_networth']}% |")
+                    a(f"| Severity | {contingent.get('severity', 'N/A')} |")
                 a("")
 
             # Auditor Analysis
@@ -808,6 +976,36 @@ class ReportGenerator:
             if say_do.get('is_governance_risk'):
                 a("> 🔴 **GOVERNANCE RISK:** Management consistently misses "
                   "its own guidance — credibility below acceptable threshold.\n")
+                a("> 💡 *Analyst Note: The Say-Do Ratio is a lagging "
+                  "indicator that reflects historical promise fulfilment "
+                  "across multiple years and leadership regimes. If the "
+                  "company has undergone a recent strategic pivot or "
+                  "management change, recent quarterly results may "
+                  "materially outperform the historical track record. "
+                  "Cross-check the latest 2-3 quarters before relying "
+                  "solely on this metric.*\n")
+                # NLP blindspot context for large/diversified companies
+                _sdr_val = say_do.get('say_do_ratio')
+                _sotp_sd = analysis.get('sotp', {}).get('available', False)
+                _seg_sd = len(analysis.get('sotp', {}).get(
+                    'segment_valuations', []))
+                if not _seg_sd:
+                    _seg_sd = len(analysis.get('segmental', {}).get(
+                        'segments', []))
+                if (_sdr_val is not None and _sdr_val < 0.15
+                        and (_sotp_sd or _seg_sd >= 3)):
+                    a("> ⚠️ *NLP Limitation: For large diversified "
+                      "companies, the automated tracker captures "
+                      "keyword-level short-term guidance (margin "
+                      "targets, quarterly timelines) that may "
+                      "fluctuate with macro volatility. It often "
+                      "fails to credit successful multi-year "
+                      "structural execution (e.g. new business "
+                      "verticals reaching scale, capacity buildouts, "
+                      "tariff hike pass-throughs). A near-zero score "
+                      "for a company with demonstrable long-term "
+                      "execution track record warrants manual "
+                      "verification against actual delivered results.*\n")
 
             comparisons = say_do.get('comparisons', [])
             if comparisons:
@@ -823,6 +1021,17 @@ class ReportGenerator:
                       f"| {s_icon} {status} |")
                 a("")
 
+            # Time-decay transparency
+            if say_do.get('time_decay_applied'):
+                _uw = say_do.get('unweighted_ratio')
+                _uw_str = f'{_uw:.2f}' if _uw is not None else 'N/A'
+                a(f"> 📐 *Time-Decay Applied (λ=0.5): recent quarters "
+                  f"carry exponentially higher weight. "
+                  f"Unweighted ratio: {_uw_str} → "
+                  f"Weighted ratio: {f'{sd_ratio:.2f}' if sd_ratio is not None else 'N/A'}. "
+                  f"This prevents legacy misses under prior management "
+                  f"from permanently depressing the score.*\n")
+
             from config import config as _cfg_sd
             _sd_t = _cfg_sd.validation.say_do_threshold
             a(f"> 💡 *Say-Do Ratio > 1.0 means management over-delivers; "
@@ -832,8 +1041,55 @@ class ReportGenerator:
         esg = analysis.get('esg', {})
         if esg.get('available'):
             a("## 🌱 ESG / BRSR Intelligence\n")
-            a(f"**ESG Score: {esg.get('esg_score', 'N/A')}/10** "
+            _esg_sc = esg.get('esg_score')
+            a(f"**ESG Score: {_esg_sc if _esg_sc is not None else 'N/A'}/10** "
               f"| BRSR: {'✅ Found' if esg.get('brsr_found') else '❌ Not found'}\n")
+
+            # Rule 6: Transition-phase modifier
+            if esg.get('transition_phase'):
+                _green_kw = esg.get('green_transition_keywords', [])
+                a(f"> 🔄 **ESG Transition Phase** — {esg.get('transition_reason', 'Green transition detected.')}\n")
+                if _green_kw:
+                    a(f"> Green keywords detected: *{', '.join(_green_kw[:4])}*\n")
+                a("> 💡 *The +1 score uplift has been applied to "
+                  "reflect forward-looking decarbonisation intent. "
+                  "Investors should track annual BRSR disclosures "
+                  "for evidence of execution against these green "
+                  "commitments.*\n")
+
+            # Analyst context: very low ESG score
+            if _esg_sc is not None and _esg_sc <= 2:
+                a("> ⚠️ *Bottom-decile ESG score. Institutional mandates "
+                  "(pension funds, sovereign wealth, ESG-screened ETFs) "
+                  "increasingly require minimum sustainability thresholds. "
+                  "A persistent low score may limit foreign institutional "
+                  "inflows, raise the cost of capital, and trigger "
+                  "exclusion from ESG-aligned indices.*\n")
+            elif _esg_sc is not None and _esg_sc <= 4:
+                # Check for green-transition indicators: carbon
+                # targets, renewable energy %, or ESG improvement.
+                _has_targets = bool(esg.get('carbon_targets'))
+                _renew_pct = esg.get('metrics', {}).get(
+                    'renewable_energy_pct')
+                if _has_targets or (_renew_pct is not None and _renew_pct > 0):
+                    a("> 💡 *Analyst Note: A low ESG score in a "
+                      "company with stated carbon-reduction targets "
+                      "or renewable energy investments often reflects "
+                      "the legacy carbon-intensive footprint rather "
+                      "than forward-looking intent. The automated "
+                      "screener penalises historical emissions and "
+                      "may not credit ongoing green-transition "
+                      "capital expenditure (solar, battery, green H₂). "
+                      "As transition capacity comes online, ESG "
+                      "scores should improve structurally. Monitor "
+                      "annual BRSR disclosures for year-on-year "
+                      "trajectory rather than absolute level.*\n")
+                else:
+                    a("> ⚠️ *Low ESG score with no visible green-"
+                      "transition roadmap. Institutional mandates "
+                      "increasingly screen for minimum ESG thresholds; "
+                      "sustained poor scores may limit foreign "
+                      "institutional inflows and raise cost of capital.*\n")
 
             metrics = esg.get('metrics', {})
             if metrics:
@@ -869,83 +1125,7 @@ class ReportGenerator:
                     a(f"- **P{p['number']}:** {p['description']}")
                 a("")
 
-        # ── Qualitative Intelligence ─────────────────────────
-        qual = analysis.get('qualitative', {})
-        if qual.get('available'):
-            a("## 🧠 Qualitative Intelligence\n")
-
-            # Sentiment
-            sent = qual.get('sentiment', {})
-            if sent.get('available'):
-                a("### Management Sentiment\n")
-                tone = sent.get('tone', sent.get('label', 'N/A'))
-                sc = sent.get('overall_score', sent.get('score', 'N/A'))
-                a(f"| Metric | Value |")
-                a(f"|--------|------:|")
-                a(f"| Overall Tone | **{tone}** |")
-                a(f"| Sentiment Score | {sc} |")
-                num_c = sent.get('num_chunks')
-                if num_c:
-                    a(f"| Chunks Analyzed | {num_c} |")
-                # Q&A section sentiment (3x more predictive)
-                qa_score = sent.get('qa_score')
-                qa_tone = sent.get('qa_tone')
-                if qa_score is not None:
-                    a(f"| Q&A Section Score | {qa_score} |")
-                    a(f"| Q&A Tone | **{qa_tone}** |")
-                    a(f"| Q&A Chunks | {sent.get('qa_num_chunks', 'N/A')} |")
-                mgmt_score = sent.get('mgmt_score')
-                mgmt_tone = sent.get('mgmt_tone')
-                if mgmt_score is not None:
-                    a(f"| Mgmt Remarks Score | {mgmt_score} |")
-                    a(f"| Mgmt Remarks Tone | **{mgmt_tone}** |")
-                a("")
-                if qa_score is not None and mgmt_score is not None:
-                    a("> 💡 *Analyst Q&A sentiment is typically 3x more predictive "
-                      "of future stock performance than prepared management remarks.*\n")
-
-            # Management Delta
-            mgmt = qual.get('management_delta', {})
-            if mgmt.get('available'):
-                a("### Management Guidance Delta\n")
-                a(f"**{mgmt.get('summary', 'N/A')}**\n")
-                comps = mgmt.get('comparisons', [])
-                if comps:
-                    # ── Aggregate duplicates: one row per topic ─────
-                    from collections import defaultdict, Counter
-                    _topic_agg = defaultdict(lambda: {'cur': [], 'pri': [], 'delta': [], 'sev': []})
-                    for c in comps:
-                        t = c.get('topic', '?')
-                        _topic_agg[t]['cur'].append(c.get('current_sentiment', 0))
-                        _topic_agg[t]['pri'].append(c.get('prior_sentiment', 0))
-                        d = c.get('delta', {})
-                        _topic_agg[t]['delta'].append(d.get('delta', 0))
-                        _topic_agg[t]['sev'].append(d.get('severity', '?'))
-
-                    a("| Topic | Current Sent. | Prior Sent. | Δ | Signal |")
-                    a("|-------|:------------:|:-----------:|--:|--------|")
-                    for topic, vals in _topic_agg.items():
-                        _cur = sum(vals['cur']) / len(vals['cur'])
-                        _pri = sum(vals['pri']) / len(vals['pri'])
-                        _dlt = sum(vals['delta']) / len(vals['delta'])
-                        _sev = Counter(vals['sev']).most_common(1)[0][0]
-                        a(f"| {topic} | "
-                          f"{_cur:.2f} | "
-                          f"{_pri:.2f} | "
-                          f"{_dlt:+.2f} | "
-                          f"{_sev} |")
-                    a("")
-
-            # Key Themes
-            themes = qual.get('key_themes', {})
-            if themes:
-                a("### Key Themes from Transcripts\n")
-                for query, snippets in themes.items():
-                    a(f"**{query.title()}:**")
-                    for s in snippets[:2]:
-                        snip = self._smart_truncate(s, 600)
-                        a(f"> {snip}\n")
-                a("")
+        # ── (Qualitative RAG section removed — using document extraction only) ──
 
         # ── Text Intelligence (NEW) ──────────────────────────
         if text_intel.get('available'):
@@ -984,7 +1164,23 @@ class ReportGenerator:
             if risks:
                 a("### Risk Signals (from text)\n")
                 for r in risks[:5]:
+                    _r_lower = r.lower()
                     a(f"> ⚠️ {self._smart_truncate(r, 500)}\n")
+                    # Analyst context: attrition risk
+                    if 'attrition' in _r_lower:
+                        a("> 💡 *Analyst Note: Elevated attrition is an "
+                          "operational risk — it raises recruitment costs, "
+                          "disrupts institutional knowledge continuity, "
+                          "and can bottleneck growth execution.*\n")
+                    # Analyst context: tariff / geopolitical exposure
+                    if any(kw in _r_lower for kw in
+                           ('tariff', 'geopolitical', 'trade polic',
+                            'cross-border', 'sanction')):
+                        a("> 💡 *Analyst Note: Geopolitical and trade-policy "
+                          "exposure requires continuous monitoring — "
+                          "even if management denies immediate impact, "
+                          "regulatory shifts or sanctions can create "
+                          "sudden cost or revenue headwinds.*\n")
 
             opps = text_intel.get('opportunities', [])
             if opps:
@@ -1077,6 +1273,20 @@ class ReportGenerator:
             a(f"Bull signals: {sig.get('bull_count', 0)} | "
               f"Bear signals: {sig.get('bear_count', 0)} | "
               f"Total: {sig.get('total', 0)}\n")
+
+            # Analyst note for bearish setups
+            if signal in ('STRONG_BEARISH', 'MILDLY_BEARISH'):
+                a("> 💡 *Analyst Note: Bearish technical signals "
+                  "reflect genuine short-term price microstructure "
+                  "and should be taken at face value for any "
+                  "6-to-12-month investment horizon. However, "
+                  "technicals are trailing indicators — they capture "
+                  "current momentum, not future catalysts. If "
+                  "fundamental re-rating triggers are imminent "
+                  "(tariff hikes, new vertical revenue, margin "
+                  "expansion), the technical setup can reverse "
+                  "rapidly. Use this signal for entry timing, not "
+                  "thesis invalidation.*\n")
 
             # Trend
             trend_t = tech.get('trend', {})
@@ -1364,10 +1574,15 @@ class ReportGenerator:
             cl = validation.get('contingent_flag')
             if cl and cl.get('available'):
                 a("### ⚡ Contingent Liabilities\n")
-                sev = cl.get('severity', 'LOW')
-                sev_icon = {"CRITICAL": "🔴", "HIGH": "🟠",
-                            "MEDIUM": "🟡", "LOW": "🟢"}.get(sev, "⚪")
-                a(f"- {sev_icon} {cl.get('detail', 'N/A')}")
+                if cl.get('data_quality_issue'):
+                    a("- ⚠️ **DATA QUALITY:** Extracted figure is "
+                      "implausibly large — likely a text-extraction "
+                      "artefact. Verify against audited filings.")
+                else:
+                    sev = cl.get('severity', 'LOW')
+                    sev_icon = {"CRITICAL": "🔴", "HIGH": "🟠",
+                                "MEDIUM": "🟡", "LOW": "🟢"}.get(sev, "⚪")
+                    a(f"- {sev_icon} {cl.get('detail', 'N/A')}")
                 a("")
         elif validation and validation.get('reason'):
             a("## 📋 Data Validation\n")
@@ -1449,7 +1664,9 @@ class ReportGenerator:
                 # Without sector context, only flag extreme P/E
                 risks.append(f"🟡 **Rich Valuation** — P/E {pe:.1f}x (no peer comparison available).")
 
-        if dcf.get('available'):
+        if dcf.get('sector_skip'):
+            pass  # DCF intentionally skipped for financial sector — not a risk
+        elif dcf.get('available'):
             dcf_guardrail = dcf.get('dcf_ev_mismatch', False)
             _data_suspended = analysis.get('rating', {}).get('data_suspended', False)
             up = dcf.get('upside_pct')
@@ -1462,9 +1679,19 @@ class ReportGenerator:
                 from config import config as _cfg
                 _ev_d = dcf.get('ev_delta_pct', '?')
                 _ev_t = _cfg.validation.dcf_ev_threshold_pct
-                risks.append(
-                    f"EV deviation {_ev_d}% exceeds {_ev_t:.0f}% threshold; DCF valuation suppressed."
-                )
+                _sotp_avail_r = analysis.get('sotp', {}).get('available', False)
+                if _sotp_avail_r:
+                    risks.append(
+                        f"🟡 **DCF Guardrail Triggered (SOTP Available)** — "
+                        f"EV deviation {_ev_d}% exceeds {_ev_t:.0f}% threshold. "
+                        f"DCF may undervalue peak-CapEx conglomerates; "
+                        f"refer to SOTP valuation for a segment-level view.")
+                else:
+                    risks.append(
+                        f"🔴 **DCF Guardrail Triggered** — "
+                        f"EV deviation {_ev_d}% exceeds {_ev_t:.0f}% threshold; "
+                        f"DCF target price suppressed. Current valuation "
+                        f"premium leaves minimal margin of safety.")
 
         ic = ratios.get('interest_coverage')
         if ic is not None and isinstance(ic, (int, float)) and ic < 1:
@@ -1477,11 +1704,7 @@ class ReportGenerator:
             risks.append(f"🔴 **Cash Flow Quality Concern** — CFO/EBITDA at "
                          f"{cfo.get('ratio', '?')}%; profits may not be cash-backed.")
 
-        # Sentiment red flag
-        sent = analysis.get('sentiment', {})
-        if sent.get('available') and sent.get('tone') in ('BEARISH', 'CAUTIOUS'):
-            risks.append(f"🟡 **Negative Management Tone** — "
-                         f"Sentiment: {sent.get('tone')}")
+        # Sentiment red flag (disabled — RAG/FinBERT removed)
 
         # Prediction red flag
         pred = analysis.get('prediction', {})
@@ -1493,13 +1716,36 @@ class ReportGenerator:
         # RPT red flag
         rpt = analysis.get('rpt', {})
         if rpt.get('available') and rpt.get('severity') in ('HIGH', 'CRITICAL'):
-            risks.append(f"🔴 **High Related Party Exposure** — {rpt.get('flag', '')}")
+            _rpt_pct = rpt.get('rpt_as_pct_revenue')
+            _sotp_avail = analysis.get('sotp', {}).get('available', False)
+            _seg_n = len(analysis.get('sotp', {}).get(
+                'segment_valuations', []))
+            if not _seg_n:
+                _seg_n = len(analysis.get('segmental', {}).get(
+                    'segments', []))
+            # For conglomerates, very high RPT% is typically intra-group
+            if (_rpt_pct is not None and _rpt_pct > 50
+                    and (_sotp_avail or _seg_n >= 3)):
+                risks.append(
+                    f"🟡 **Elevated RPT ({_rpt_pct:.0f}% of Revenue)** "
+                    f"— Likely reflects intra-group accounting in a "
+                    f"diversified holding structure ({_seg_n} segments). "
+                    f"Consolidated accounts eliminate these flows; "
+                    f"review Audit Committee RPT certification.")
+            else:
+                risks.append(f"🔴 **High Related Party Exposure** — {rpt.get('flag', '')}")
 
         # Contingent liabilities red flag
         contingent = analysis.get('contingent', {})
-        if contingent.get('available') and contingent.get('severity') in ('HIGH', 'CRITICAL'):
-            risks.append(f"🔴 **Large Contingent Liabilities** — "
-                         f"{contingent.get('detail', '')}")
+        if contingent.get('available'):
+            if contingent.get('data_quality_issue'):
+                risks.append(
+                    "🟡 **Contingent Liabilities (Data Quality Issue)** — "
+                    "Automated extraction returned an implausible figure; "
+                    "cross-check against audited filings required.")
+            elif contingent.get('severity') in ('HIGH', 'CRITICAL'):
+                risks.append(f"🔴 **Large Contingent Liabilities** — "
+                             f"{contingent.get('detail', '')}")
 
         # Auditor red flag
         aud = analysis.get('auditor_analysis', {})
@@ -1513,7 +1759,52 @@ class ReportGenerator:
         if pledge.get('is_red_flag'):
             risks.append(f"🔴 **High Promoter Pledging** — "
                          f"{pledge.get('current', 'N/A')}% pledged. "
-                         f"Risk of forced liquidation.")
+                         f"Margin calls during corrections can force "
+                         f"liquidations and accelerate price decline.")
+
+        # Institutional exodus / retail-heavy float
+        if isinstance(shp, dict):
+            _fii_r = _dii_r = _ret_r = None
+            for _cat, _v in shp.items():
+                if _cat == 'PromoterPledging':
+                    continue
+                _cv = _v.get('current') if isinstance(_v, dict) else None
+                if not isinstance(_cv, (int, float)):
+                    continue
+                _cl = _cat.lower()
+                if 'fii' in _cl or 'fpi' in _cl:
+                    _fii_r = _cv
+                elif 'dii' in _cl:
+                    _dii_r = _cv
+                elif 'public' in _cl or 'retail' in _cl:
+                    _ret_r = _cv
+            if (_fii_r is not None and _dii_r is not None
+                    and _fii_r + _dii_r < 5
+                    and _ret_r is not None and _ret_r > 30):
+                risks.append(
+                    f"🟡 **Institutional Exodus** — FII ({_fii_r:.1f}%) "
+                    f"+ DII ({_dii_r:.1f}%) < 5% combined; retail at "
+                    f"{_ret_r:.1f}%. Retail-heavy float amplifies "
+                    "technical volatility in corrections.")
+
+        # ESG risk
+        _esg_r = analysis.get('esg', {})
+        if _esg_r.get('available'):
+            _esg_sc_r = _esg_r.get('esg_score')
+            if _esg_sc_r is not None and _esg_sc_r <= 3:
+                _has_tgt = bool(_esg_r.get('carbon_targets'))
+                _renew = _esg_r.get('metrics', {}).get('renewable_energy_pct')
+                if _has_tgt or (_renew is not None and _renew > 0):
+                    risks.append(
+                        f"🟡 **Low ESG Score ({_esg_sc_r}/10)** — "
+                        f"Legacy carbon footprint drives the score; "
+                        f"green-transition CapEx is underway but not "
+                        f"yet reflected in metrics.")
+                else:
+                    risks.append(
+                        f"🔴 **Poor ESG Score ({_esg_sc_r}/10)** — "
+                        f"No visible green-transition roadmap; may "
+                        f"limit institutional inflows.")
 
         # Governance red flag
         governance = analysis.get('governance', {})
@@ -1536,10 +1827,41 @@ class ReportGenerator:
 
         # 5Y Trend deterioration
         trends = analysis.get('trends', {})
-        if trends.get('available') and trends.get('overall_direction') == 'DETERIORATING':
-            _th = trends.get('health_score')
-            risks.append(f"🔴 **Deteriorating 5Y Trends** — "
-                         f"Health score {_th if _th is not None else 'N/A'}/10")
+        if trends.get('available'):
+            if trends.get('overall_direction') == 'DETERIORATING':
+                _th = trends.get('health_score')
+                risks.append(f"🔴 **Deteriorating 5Y Trends** — "
+                             f"Health score {_th if _th is not None else 'N/A'}/10")
+            else:
+                # Check metric-level deceleration
+                _t_metrics = trends.get('metrics', [])
+                _t_decel = [m for m in _t_metrics
+                            if m.get('acceleration') == 'DECELERATING']
+                _t_corp = [m for m in _t_metrics
+                           if m.get('acceleration') == 'DECELERATING_CORP_ACTION']
+                if _t_corp:
+                    _ca_yr = trends.get('corp_action_year', '?')
+                    risks.append(
+                        f"🟡 **Deceleration (Corporate Action {_ca_yr})** — "
+                        f"{len(_t_corp)} metrics show dilution-driven "
+                        f"deceleration from stock split / bonus / merger; "
+                        f"evaluate absolute (not per-share) growth.")
+                if len(_t_decel) >= 3:
+                    _rev_m_r = next(
+                        (m for m in _t_metrics if m.get('label') == 'Revenue'),
+                        {})
+                    _rev_l_r = _rev_m_r.get('latest', 0)
+                    if _rev_l_r > 50000:
+                        risks.append(
+                            f"🟡 **Growth Decelerating (Base Effect)** — "
+                            f"{len(_t_decel)} metrics decelerating at "
+                            f"₹{_rev_l_r:,.0f} Cr revenue scale; "
+                            f"transition to steady-state compounder.")
+                    else:
+                        risks.append(
+                            f"🟡 **Growth Decelerating** — "
+                            f"{len(_t_decel)} of {len(_t_metrics)} "
+                            f"metrics show decelerating momentum.")
 
         # Forensic Dashboard red flags
         forensic_db = analysis.get('forensic_dashboard', {})
@@ -1554,9 +1876,25 @@ class ReportGenerator:
         if say_do.get('available') and say_do.get('is_governance_risk'):
             from config import config as _cfg
             _sdr = say_do.get('say_do_ratio')
-            risks.append(f"🔴 **Management Credibility Risk** — "
-                         f"Say-Do Ratio {f'{_sdr:.2f}' if _sdr is not None else 'N/A'} "
-                         f"(below {_cfg.validation.say_do_threshold} threshold)")
+            _sotp_sd_r = analysis.get('sotp', {}).get('available', False)
+            _seg_sd_r = len(analysis.get('sotp', {}).get(
+                'segment_valuations', []))
+            if not _seg_sd_r:
+                _seg_sd_r = len(analysis.get('segmental', {}).get(
+                    'segments', []))
+            if (_sdr is not None and _sdr < 0.15
+                    and (_sotp_sd_r or _seg_sd_r >= 3)):
+                risks.append(
+                    f"🟡 **Management Credibility (NLP Caveat)** — "
+                    f"Say-Do Ratio {_sdr:.2f} reflects keyword-level "
+                    f"short-term tracking; large conglomerates' multi-year "
+                    f"structural execution is poorly captured by automated "
+                    f"NLP. Verify against actual delivered milestones.")
+            else:
+                risks.append(
+                    f"🔴 **Management Credibility Risk** — "
+                    f"Say-Do Ratio {f'{_sdr:.2f}' if _sdr is not None else 'N/A'} "
+                    f"(below {_cfg.validation.say_do_threshold} threshold)")
 
         # Macro headwinds
         macro_corr = analysis.get('macro_corr', {})

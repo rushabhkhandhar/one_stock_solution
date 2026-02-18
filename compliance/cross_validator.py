@@ -147,7 +147,7 @@ class CrossValidator:
         # ------------------------------------------------------------------
         # Compute Trust Score
         # ------------------------------------------------------------------
-        passed  = sum(1 for c in checks if c['status'] == 'MATCH')
+        passed  = sum(1 for c in checks if c['status'] in ('MATCH', 'CORPORATE_ACTION_ADJUSTED'))
         partial = sum(1 for c in checks if c['status'] == 'PARTIAL')
         skipped = sum(1 for c in checks if c['status'] == 'SKIPPED')
         total   = sum(1 for c in checks if c['status'] != 'SKIPPED')
@@ -278,6 +278,27 @@ class CrossValidator:
                     f'Unit mismatch detected (Lakhs→Crores, ÷{v.lakhs_to_crores:.0f}): '
                     f'AR {ar_val:,.2f} Lakhs ≈ {ar_normalised:,.2f} Cr — '
                     f'{adj_pct:.1f}% diff after conversion'
+                )
+
+        # ── Corporate-action adjustment detection ────────────
+        # For EPS specifically, Screener.in restates for splits/bonus/
+        # mergers using post-action share count.  If the ratio of
+        # AR_value / scraper_value is close to 2, 3, 5, or 10, this
+        # is likely a corporate-action adjustment, not a true mismatch.
+        if (result['status'] in ('MISMATCH', 'PARTIAL')
+                and 'EPS' in metric
+                and scraper_val is not None and ar_val is not None
+                and scraper_val > 0 and ar_val > 0):
+            _ratio = ar_val / scraper_val
+            _corp_mults = [2, 3, 5, 10]
+            _closest = min(_corp_mults, key=lambda c: abs(_ratio - c))
+            if abs(_ratio - _closest) / _closest < 0.15:
+                result['status'] = 'CORPORATE_ACTION_ADJUSTED'
+                result['corporate_action_multiplier'] = _closest
+                result['detail'] = (
+                    f'AR EPS ({ar_val:.2f}) ≈ {_closest}× Scraper EPS '
+                    f'({scraper_val:.2f}) — likely a merger/split/bonus '
+                    f'share-count adjustment. Not a data error.'
                 )
 
         return result

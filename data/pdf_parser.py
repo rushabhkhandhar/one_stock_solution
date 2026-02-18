@@ -138,8 +138,12 @@ class PDFParser:
         # Phase F -- Special sections
         contingent = self._extract_section_text(
             pdf_path, sections.get('contingent_liabilities', []), max_pages=2)
+        # RPT: filter out AGM notice pages (which contain authorization
+        # limits, not actual RPT figures) and prefer Notes pages.
+        rpt_pages = self._filter_rpt_pages(
+            pdf_path, sections.get('related_party', []))
         related = self._extract_section_text(
-            pdf_path, sections.get('related_party', []), max_pages=2)
+            pdf_path, rpt_pages, max_pages=2)
 
         doc = fitz.open(pdf_path)
         total_pages = doc.page_count
@@ -577,6 +581,54 @@ class PDFParser:
     # ==================================================================
     # Utility -- Extract raw text from specific pages
     # ==================================================================
+    def _filter_rpt_pages(self, pdf_path: str, pages: list) -> list:
+        """Filter RPT pages: prefer Notes to FS; exclude AGM notices.
+
+        AGM notice pages contain huge authorization limits ("up to
+        ₹X crore") that dwarf actual RPT amounts and cause
+        extraction hallucinations.  Pages from Notes to Financial
+        Statements contain the real RPT disclosure.
+        """
+        if not pages:
+            return pages
+
+        import fitz as _fitz
+        doc = _fitz.open(pdf_path)
+        notes_pages = []
+        other_pages = []
+
+        AGM_RE = re.compile(
+            r'ordinary\s+resolution|special\s+resolution'
+            r'|notice\s+.*annual\s+general'
+            r'|approval\s+of\s+.*member'
+            r'|resolved\s+that\s+pursuant',
+            re.I)
+        NOTES_RE = re.compile(
+            r'notes\s+to\s+.*financial|note\s+\d+'
+            r'|standalone\s+financial\s+statement'
+            r'|consolidated\s+financial\s+statement',
+            re.I)
+
+        for pg in pages:
+            if pg > doc.page_count:
+                continue
+            text = doc[pg - 1].get_text()
+            is_agm = bool(AGM_RE.search(text))
+            is_notes = bool(NOTES_RE.search(text))
+
+            if is_agm and not is_notes:
+                continue          # skip pure AGM notice pages
+            if is_notes:
+                notes_pages.append(pg)
+            else:
+                other_pages.append(pg)
+
+        doc.close()
+
+        # Prefer notes pages; fall back to non-AGM pages
+        result = notes_pages if notes_pages else other_pages
+        return result if result else pages  # last resort: original list
+
     def _extract_section_text(self, pdf_path: str, pages: list,
                                max_pages: int = 3) -> str:
         """Extract raw text from a list of page numbers."""

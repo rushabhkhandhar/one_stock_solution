@@ -32,14 +32,43 @@ class DCFModel:
     # ==================================================================
     # Public API
     # ==================================================================
-    def calculate(self, data: dict) -> dict:
-        """Run the full DCF valuation and return a result dict."""
+    # Sectors where FCFF/FCFE DCF is structurally meaningless
+    _FINANCIAL_SECTORS = {
+        'financial services', 'banking', 'nbfc', 'insurance',
+        'financials', 'banks - regional', 'banks - diversified',
+        'credit services', 'financial data & stock exchanges',
+    }
+
+    def calculate(self, data: dict, sector: str = '') -> dict:
+        """Run the full DCF valuation and return a result dict.
+
+        Parameters
+        ----------
+        data : dict
+            Financial data from ingestion.
+        sector : str
+            yfinance sector/industry string. If the sector is a
+            financial-services variant, DCF is skipped (banks use
+            deposits as raw materials, making FCF meaningless).
+        """
         pnl      = data.get('pnl', pd.DataFrame())
         bs       = data.get('balance_sheet', pd.DataFrame())
         cf       = data.get('cash_flow', pd.DataFrame())
         price_df = data.get('price', pd.DataFrame())
 
         result = {'available': False, 'reason': ''}
+
+        # ── Rule 1A: Skip DCF entirely for banks / NBFCs ──
+        _sec_lower = sector.lower().strip() if sector else ''
+        if _sec_lower and any(fs in _sec_lower
+                              for fs in self._FINANCIAL_SECTORS):
+            result['reason'] = (
+                f'DCF disabled for financial-services sector '
+                f'("{sector}"). Banks/NBFCs use deposits as raw '
+                f'materials — standard FCFF/FCFE models are '
+                f'meaningless. Use P/B, Residual Income, or DDM.')
+            result['sector_skip'] = True
+            return result
 
         # ── Verify required live market params are available ──
         if self.m.risk_free_rate is None:
@@ -65,6 +94,19 @@ class DCFModel:
             if len(fcf) < 3:
                 result['reason'] = 'Not enough FCF history (need ≥3 years)'
                 return result
+
+            # ── Rule 1B: Flag peak-CapEx companies ─────────
+            # If |CapEx| / Operating-CF > 0.8, current FCF is
+            # structurally depressed and DCF will undervalue.
+            latest_ocf = operating_cf.dropna()
+            latest_capex = capex.dropna()
+            if len(latest_ocf) >= 1 and len(latest_capex) >= 1:
+                _ocf_val = float(latest_ocf.iloc[-1])
+                _capex_val = abs(float(latest_capex.iloc[-1]))
+                if _ocf_val > 0:
+                    _capex_ratio = _capex_val / _ocf_val
+                    result['capex_ocf_ratio'] = round(_capex_ratio, 3)
+                    result['peak_capex'] = _capex_ratio > 0.8
 
             # ── 2. Growth-rate estimation ───────────────────
             fcf_growth     = self._estimate_growth(fcf)

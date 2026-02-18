@@ -18,7 +18,9 @@ class ForensicExtras:
     # ------------------------------------------------------------------
     # 2a — Related Party Transactions
     # ------------------------------------------------------------------
-    def extract_rpt(self, ar_parsed: dict, data: dict) -> dict:
+    def extract_rpt(self, ar_parsed: dict, data: dict,
+                     sotp_available: bool = False,
+                     num_segments: int = 0) -> dict:
         """
         Structured RPT extraction from annual report.
 
@@ -26,13 +28,21 @@ class ForensicExtras:
           - RPT > 10% of revenue → MEDIUM
           - RPT > 25% of revenue → HIGH
           - RPT > 50% of revenue → CRITICAL
+
+        Rule 3: If the company has SOTP/multi-segment structure (i.e.
+        holding company or conglomerate), high RPT is partially expected
+        due to inter-subsidiary transfers. Severity is contextualized.
         """
         rpt_text = ar_parsed.get('related_party_summary', '')
         if not rpt_text:
             return {'available': False, 'reason': 'No RPT section found in AR'}
 
+        # Scope the text to avoid AGM authorization limits that
+        # dwarf actual RPT figures (e.g. "up to ₹9,80,136 crore")
+        rpt_text_scoped = self._scope_rpt_text(rpt_text)
+
         # Extract monetary amounts from RPT text
-        amounts = self._extract_amounts(rpt_text)
+        amounts = self._extract_amounts(rpt_text_scoped)
         total_rpt = sum(amounts) if amounts else 0
 
         # Get revenue for comparison
@@ -47,14 +57,33 @@ class ForensicExtras:
         if total_rpt > 0 and not np.isnan(revenue) and revenue > 0:
             rpt_pct = round(total_rpt / revenue * 100, 2)
 
+        # Detect holding-company / conglomerate structure
+        _is_holding = sotp_available or num_segments >= 3
+
         # Classify severity
         if rpt_pct is not None:
             if rpt_pct > 50:
-                severity = 'CRITICAL'
-                flag = f'🔴 RPT at {rpt_pct}% of revenue — excessive related party exposure'
+                if _is_holding:
+                    severity = 'HIGH_HOLDING'
+                    flag = (f'🟠 RPT at {rpt_pct}% of revenue — '
+                            f'elevated, but company operates as a '
+                            f'multi-entity holding structure '
+                            f'({num_segments} segments). Inter-subsidiary '
+                            f'transfers are partially structural; '
+                            f'verify arm\'s-length pricing.')
+                else:
+                    severity = 'CRITICAL'
+                    flag = f'🔴 RPT at {rpt_pct}% of revenue — excessive related party exposure'
             elif rpt_pct > 25:
-                severity = 'HIGH'
-                flag = f'🟠 RPT at {rpt_pct}% of revenue — significant related party dependence'
+                if _is_holding:
+                    severity = 'MEDIUM_HOLDING'
+                    flag = (f'🟡 RPT at {rpt_pct}% of revenue — '
+                            f'within normal range for holding/'
+                            f'conglomerate structures with '
+                            f'{num_segments} segments.')
+                else:
+                    severity = 'HIGH'
+                    flag = f'🟠 RPT at {rpt_pct}% of revenue — significant related party dependence'
             elif rpt_pct > 10:
                 severity = 'MEDIUM'
                 flag = f'🟡 RPT at {rpt_pct}% of revenue — monitor closely'
@@ -74,6 +103,7 @@ class ForensicExtras:
             'rpt_as_pct_revenue': rpt_pct,
             'severity': severity,
             'flag': flag,
+            'is_holding_structure': _is_holding,
             'num_amounts_found': len(amounts),
             'categories': categories,
             'raw_text_preview': rpt_text[:500] if len(rpt_text) > 500 else rpt_text,
@@ -92,12 +122,19 @@ class ForensicExtras:
         if not cl_text:
             return {'available': False, 'reason': 'No contingent liabilities section'}
 
-        amounts = self._extract_amounts(cl_text)
+        # ── Smart scoping: if the extracted text contains a full
+        # Balance Sheet (common — PDF parser pulls the entire page
+        # that mentions "contingent liabilities"), narrow down to
+        # only the CL line and its neighbouring numbers.
+        cl_text_scoped = self._scope_contingent_text(cl_text)
+
+        amounts = self._extract_amounts(cl_text_scoped)
         total_cl = sum(amounts) if amounts else 0
 
         # Net worth = Equity Capital + Reserves
         bs = data.get('balance_sheet')
         net_worth = np.nan
+        total_assets = np.nan
         if bs is not None and not bs.empty:
             from data.preprocessing import DataPreprocessor, get_value
             pp = DataPreprocessor()
@@ -105,26 +142,52 @@ class ForensicExtras:
             res = get_value(pp.get(bs, 'reserves'))
             if not np.isnan(eq) and not np.isnan(res):
                 net_worth = eq + res
+            ta = get_value(pp.get(bs, 'total_assets'))
+            if not np.isnan(ta):
+                total_assets = ta
 
         cl_pct = None
         if total_cl > 0 and not np.isnan(net_worth) and net_worth > 0:
             cl_pct = round(total_cl / net_worth * 100, 2)
 
-        # ── Sanity bound: if extracted CL > 150% of net worth,
-        #    it's almost certainly a text-extraction artefact
-        #    (e.g. picking up unrelated numbers from AR text).
-        #    Flag as unreliable rather than reporting a hallucinated figure.
+        # ── Sanity bounding box (Rule 2) ──────────────────
+        # Multiple independent checks — if ANY fires, flag as
+        # data-quality issue rather than reporting hallucinated figure.
+        _is_implausible = False
+        _reason_parts = []
+
+        # Check 1: CL > 150% of net worth
         if cl_pct is not None and cl_pct > 150:
+            _is_implausible = True
+            _reason_parts.append(
+                f'{cl_pct:.0f}% of net worth (> 150% bound)')
+
+        # Check 2: CL > 200% of total assets
+        if (total_cl > 0 and not np.isnan(total_assets)
+                and total_assets > 0):
+            _cl_pct_ta = total_cl / total_assets * 100
+            if _cl_pct_ta > 200:
+                _is_implausible = True
+                _reason_parts.append(
+                    f'{_cl_pct_ta:.0f}% of total assets (> 200% bound)')
+
+        # Check 3: CL > 500% of net worth (catastrophic hallucination)
+        if cl_pct is not None and cl_pct > 500:
+            _is_implausible = True
+            _reason_parts.append(
+                f'{cl_pct:.0f}% of net worth (> 500% catastrophic bound)')
+
+        if _is_implausible:
             return {
                 'available': True,
                 'total_contingent': total_cl,
-                'contingent_as_pct_networth': None,  # suppress the hallucinated %
+                'contingent_as_pct_networth': None,
                 'severity': 'DATA_QUALITY',
                 'data_quality_issue': True,
                 'detail': (f'Extracted contingent amount (₹{total_cl:,.0f} Cr, '
-                           f'{cl_pct:.0f}% of net worth) exceeds plausibility '
+                           f'{"; ".join(_reason_parts)}) exceeds plausibility '
                            'bound — likely a text-extraction error. '
-                           'Could not quantify contingent liabilities reliably.'),
+                           'Manual override required.'),
             }
 
         if cl_pct is not None:
@@ -212,13 +275,150 @@ class ForensicExtras:
     # Helpers
     # ------------------------------------------------------------------
     @staticmethod
+    def _scope_contingent_text(raw_text: str) -> str:
+        """Narrow full-page text to just the contingent liabilities region.
+
+        The PDF parser often pulls the entire Balance Sheet page because
+        it contains a 'Contingent liabilities' line item.  This method
+        finds that line and returns only the surrounding context (a few
+        lines before and after) so that _extract_amounts doesn't pick up
+        the Balance Sheet totals.
+
+        If the text already looks focused (short, or has a dedicated CL
+        heading), it is returned unchanged.
+        """
+        # If the text is short enough, it's probably already scoped
+        if len(raw_text) < 1500:
+            return raw_text
+
+        lines = raw_text.split('\n')
+        cl_line_idx = None
+        for i, line in enumerate(lines):
+            if re.search(r'contingent\s+liabilit', line, re.I):
+                cl_line_idx = i
+                # Prefer a later occurrence (the actual CL note/schedule)
+                # over an early TOC reference, but take the first one
+                # that appears AFTER a balance-sheet "Total" line.
+                break
+
+        if cl_line_idx is None:
+            return raw_text
+
+        # Check if this is just a line item on the Balance Sheet page
+        # (i.e., the page also has "CAPITAL AND LIABILITIES", "ASSETS",
+        # "Total" lines).  In that case, extract just the CL line and
+        # a few surrounding lines for context/numbers.
+        has_bs_markers = any(
+            re.search(r'capital\s+and\s+liabilit|\bASSETS\b|'
+                      r'standalone\s+balance\s+sheet|\bTotal\b',
+                      l, re.I)
+            for l in lines[:cl_line_idx]
+        )
+
+        if has_bs_markers:
+            # It's a Balance Sheet page — extract ONLY the CL line
+            # and a few lines after it (schedule detail / numbers).
+            # Do NOT include lines before the CL line (those contain
+            # the Balance Sheet Total which is much larger).
+            start = cl_line_idx
+            end = min(len(lines), cl_line_idx + 8)
+            # Also prepend the unit header (first ~5 lines) so
+            # _extract_amounts can still detect the reporting unit
+            header_lines = lines[:min(8, cl_line_idx)]
+            scoped = '\n'.join(header_lines + ['---'] + lines[start:end])
+            return scoped
+
+        # Not a Balance Sheet page — return full text
+        return raw_text
+
+    @staticmethod
+    def _scope_rpt_text(raw_text: str) -> str:
+        """Remove AGM-notice authorization blocks from RPT text.
+
+        AGM notices typically contain lines like:
+          "RESOLVED THAT ... approval ... to enter into related
+           party transactions ... not exceeding ₹9,80,136 crore"
+        These are *proposed caps*, not actual RPT amounts.  We strip
+        them so that _extract_amounts only sees real figures.
+        """
+        # Split on page separators (our pdf_parser joins pages with ---)
+        pages = re.split(r'\n---\n', raw_text)
+        if len(pages) <= 1:
+            # Single page — try to strip AGM resolution blocks inline
+            # Remove "RESOLVED THAT ... ." blocks
+            cleaned = re.sub(
+                r'"?RESOLVED\s+(?:THAT|FURTHER).*?(?:\.|")',
+                '', raw_text, flags=re.I | re.S)
+            return cleaned if len(cleaned) > 200 else raw_text
+
+        # Multiple pages — keep only those that look like Notes, not AGM
+        agm_re = re.compile(
+            r'ordinary\s+resolution|special\s+resolution'
+            r'|approval\s+of\s+.*member'
+            r'|resolved\s+that\s+pursuant', re.I)
+        notes_pages = []
+        other_pages = []
+        for pg in pages:
+            if agm_re.search(pg):
+                continue          # drop AGM pages entirely
+            notes_pages.append(pg)
+
+        result = '\n---\n'.join(notes_pages) if notes_pages else raw_text
+        return result if len(result) > 200 else raw_text
+
+    @staticmethod
     def _extract_amounts(text: str) -> list:
-        """Extract monetary amounts (in Crores) from text."""
-        # Pattern: numbers with optional commas, optional decimal
-        # May be preceded by ₹ or Rs or followed by "crore" / "lakhs"
+        """Extract monetary amounts (in Crores) from text.
+
+        Strategy:
+        1. Detect the page-level reporting unit from headers
+           (e.g. "in ₹ Thousands", "₹ in Lakhs").
+        2. Match unit-annotated amounts (crore, lakh) first.
+        3. Fallback: use only the LARGEST plain number (not sum of all)
+           and apply the detected unit conversion.
+        """
         amounts = []
 
-        # Pattern for crore amounts
+        # ── Detect reporting unit from page header ────────────
+        _unit_divisor = 1.0          # default: assume Crores
+        _unit_label = 'crores'
+        _header_region = text[:800].lower()   # unit info is near top
+        # Patterns handle varied Indian AR formats:
+        #   "(₹ in Thousands)", "(Amounts in ₹ Thousands)",
+        #   "(₹ in '000s)", "(in ₹ Lakhs)", "(Rs. in Crores)"
+        #   "(` in '000)" — backtick used for ₹ in some bank ARs
+        #   "(in '000)" — no currency symbol at all
+        # ₹ variants: ₹, Rs, Rupee, ` (backtick/grave accent)
+        _RUPEE = r"(?:₹|`|rs\.?|rupee)"
+        # Thousands patterns: thousand, '000, 000s, '000s
+        # Note: PDF extractors often produce smart-quotes \u2018/\u2019
+        _APOS  = r"[\u2018\u2019'`]"
+        _THOU  = r"(?:thousand|" + _APOS + r"000|" + _APOS + r"000s|000s?)"
+        _LAKH  = r"(?:lakh|lac|lakhs)"
+        _CRORE = r"(?:crore|cr[.\s]|crores)"
+
+        # Check for thousands — with or without currency symbol
+        if (re.search(_RUPEE + r'\s*(?:in\s*)?' + _THOU, _header_region)
+                or re.search(r'(?:in|amount)\s*' + _RUPEE + r'\s*' + _THOU,
+                             _header_region)
+                or re.search(r'\(\s*(?:in\s*)?' + _THOU + r'\s*\)',
+                             _header_region)
+                or re.search(r'\(\s*' + _RUPEE + r'\s*(?:in\s*)?' + _THOU,
+                             _header_region)):
+            _unit_divisor = 1e5      # thousands → crores
+            _unit_label = 'thousands'
+        elif (re.search(_RUPEE + r'\s*(?:in\s*)?' + _LAKH, _header_region)
+                or re.search(r'(?:in|amount)\s*' + _RUPEE + r'\s*' + _LAKH,
+                             _header_region)):
+            _unit_divisor = 100      # lakhs → crores
+            _unit_label = 'lakhs'
+        elif (re.search(_RUPEE + r'\s*(?:in\s*)?' + _CRORE, _header_region)
+                or re.search(r'(?:in|amount)\s*' + _RUPEE + r'\s*' + _CRORE,
+                             _header_region)):
+            _unit_divisor = 1.0
+            _unit_label = 'crores'
+
+        # ── 1. Unit-annotated amounts (crore) ─────────────────
         crore_pat = re.compile(
             r'(?:₹|Rs\.?\s*)?'
             r'([\d,]+(?:\.\d+)?)\s*'
@@ -233,7 +433,7 @@ class ForensicExtras:
             except ValueError:
                 pass
 
-        # Pattern for lakh amounts (convert to crore)
+        # ── 2. Unit-annotated amounts (lakh → crore) ──────────
         lakh_pat = re.compile(
             r'(?:₹|Rs\.?\s*)?'
             r'([\d,]+(?:\.\d+)?)\s*'
@@ -248,16 +448,24 @@ class ForensicExtras:
             except ValueError:
                 pass
 
-        # If no unit-annotated amounts, try plain large numbers
+        # ── 3. Fallback: largest plain number only ────────────
+        # Use the single largest number (not sum) and convert
+        # using the detected reporting unit.
         if not amounts:
             plain_pat = re.compile(r'([\d,]+(?:\.\d+)?)')
+            candidates = []
             for m in plain_pat.finditer(text):
                 try:
                     val = float(m.group(1).replace(',', ''))
-                    if val > 100:  # Only large numbers likely in Cr
-                        amounts.append(val)
+                    if val > 100:  # filter trivial numbers
+                        candidates.append(val)
                 except ValueError:
                     pass
+            if candidates:
+                # Take the largest single amount and convert to Cr
+                max_val = max(candidates) / _unit_divisor
+                if max_val > 0:
+                    amounts.append(max_val)
 
         return amounts
 

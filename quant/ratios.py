@@ -93,6 +93,57 @@ class FinancialRatios:
         ttm_eps = data.get('ttm_eps')
         pe_eps = None  # The EPS actually used for P/E
 
+        # ── Corporate-action EPS adjustment detection ──────────
+        # Screener.in restates historical EPS for splits/bonus/mergers
+        # using the post-action share count for time-series comparability.
+        # This can make "Annual EPS" ~2x lower than statutory EPS.
+        #
+        # Detection: compare scraper-implied shares (PAT / EPS) vs
+        # balance-sheet equity capital.
+        if (not np.isnan(eps) and eps > 0
+                and not np.isnan(net_prof) and net_prof > 0
+                and not bs.empty):
+            _implied_shares = net_prof / eps          # in Cr
+            _eq_cap_raw = self._z(
+                get_value(pp.get(bs, 'equity_capital')))
+            if _eq_cap_raw > 0:
+                # Try face-value ₹1 and ₹10
+                _bs_shares_1 = _eq_cap_raw           # face ₹1
+                _bs_shares_10 = _eq_cap_raw * 10     # face ₹10
+                _candidates = [1, 2, 3, 5, 10]
+
+                def _nearest(ratio):
+                    return min(_candidates, key=lambda c: abs(ratio - c))
+
+                _r1 = _implied_shares / _bs_shares_1 if _bs_shares_1 > 0 else 0
+                _r10 = _implied_shares / _bs_shares_10 if _bs_shares_10 > 0 else 0
+                # Choose the face-value assumption whose ratio is
+                # closest to a clean integer multiplier
+                _d1 = abs(_r1 - _nearest(_r1))
+                _d10 = abs(_r10 - _nearest(_r10))
+                if _d1 <= _d10:
+                    _bs_shares, _ratio = _bs_shares_1, _r1
+                else:
+                    _bs_shares, _ratio = _bs_shares_10, _r10
+
+                _closest_mult = _nearest(_ratio)
+                if (_closest_mult >= 2
+                        and abs(_ratio - _closest_mult) / _closest_mult < 0.15):
+                    # Screener used diluted share count → correct EPS
+                    _corrected_eps = round(net_prof / _bs_shares, 2)
+                    eps = _corrected_eps
+                    r['eps'] = _corrected_eps
+                    r['eps_adjusted'] = True
+                    r['eps_adjustment_reason'] = (
+                        f'Screener EPS uses ~{_closest_mult}x post-action '
+                        f'share count (merger/split/bonus). Corrected to '
+                        f'₹{_corrected_eps:.2f} using B/S equity capital.'
+                    )
+                    # Correct TTM EPS proportionally
+                    if ttm_eps is not None and ttm_eps > 0:
+                        ttm_eps = round(ttm_eps * _closest_mult, 2)
+                        r['ttm_eps'] = ttm_eps
+
         if ttm_eps is not None and ttm_eps > 0:
             pe_eps = ttm_eps
             r['ttm_eps'] = round(ttm_eps, 2)

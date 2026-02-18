@@ -12,11 +12,149 @@ Produces:
   3. Forward-looking statement detection
   4. Risk/opportunity classification
 
-Uses keyword matching + FinBERT sentiment for each topic.
-No LLM — pure NLP heuristics.
+Uses keyword matching + pattern extraction from documents only.
+No LLM or embedding models — pure NLP heuristics.
 """
 import re
 from collections import defaultdict
+
+
+# ─── Transcript noise cleaning (moved from rag_engine.py) ────────────
+
+def clean_transcript_noise(text: str) -> str:
+    """Strip common PDF artefacts from BSE concall transcript text.
+
+    Handles both full-document cleaning and snippet-level cleaning.
+    Safe to call multiple times (idempotent).
+    """
+    if not text:
+        return text
+
+    # ── Full-document preamble removal ────────────────────
+    for marker_re in [
+        r'Media\s*&?\s*Analyst\s+Call\s+Transcript',
+        r'Concall\s+Transcript',
+        r'Earnings\s+Call\s+Transcript',
+    ]:
+        m = re.search(marker_re, text, re.IGNORECASE)
+        if m:
+            text = text[m.end():]
+            break
+
+    # Remove digital-signature blocks
+    text = re.sub(
+        r'Digitally\s+signed\s+by.*?[\+\-]\d{2}\'\d{2}\'',
+        '', text, flags=re.DOTALL)
+
+    # ── Page-number + copyright footer (separate lines) ──
+    text = re.sub(
+        r'^\s*\d{1,3}\s*\n\s*©.*?(?:Limited|Ltd\.?)\s*\d{4}\s*$',
+        '', text, flags=re.MULTILINE)
+    text = re.sub(
+        r'^\s*©.*?(?:Limited|Ltd\.?)\s*\d{4}\s*$',
+        '', text, flags=re.MULTILINE)
+
+    # ── Inline page+copyright that lands mid-sentence ────
+    text = re.sub(
+        r'\s*\d{1,3}\s+©\s+\w[\w\s]*?(?:Limited|Ltd\.?)\s*\d{4}\s*',
+        ' ', text)
+
+    # ── Speaker / questioner labels (own line) ───────────
+    text = re.sub(
+        r'^\s*Company\s+Speaker\s*\([^)]*\)\s*$',
+        '', text, flags=re.MULTILINE)
+    text = re.sub(
+        r'^\s*Questioner\s*\([^)]*\)\s*$',
+        '', text, flags=re.MULTILINE)
+
+    # ── Inline speaker prefix at start of a snippet ──────
+    text = re.sub(
+        r'^\s*(?:Company\s+Speaker|Questioner)\s*\([^)]*\)\s*',
+        '', text)
+
+    # ── Inline speaker/questioner labels anywhere in text ─
+    text = re.sub(
+        r'\s*(?:Company\s+Speaker|Questioner)\s*\([^)]*\)\s*',
+        ' ', text)
+
+    # ── Trailing ")" from a cut speaker name ─────────────
+    text = re.sub(r'^[A-Z][a-zA-Z .]+\)\s+', '', text)
+
+    # ── Timestamp headers ────────────────────────────────
+    text = re.sub(
+        r'^.*?\d{1,2}:\d{2}:\d{2}\s*[–\-]\s*\d{1,2}:\d{2}:\d{2}.*$',
+        '', text, flags=re.MULTILINE)
+
+    # ── Company-specific headers ─────────────────────────
+    text = re.sub(
+        r'^\s*RIL\s+Q\d.*?\d{4}\s*$', '', text, flags=re.MULTILINE)
+
+    # ── Bare page numbers on their own line ──────────────
+    text = re.sub(r'^\s*\d{1,3}\s*$', '', text, flags=re.MULTILINE)
+
+    # ── Collapse whitespace ──────────────────────────────
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    text = re.sub(r'  +', ' ', text)
+    return text.strip()
+
+
+def smart_truncate(text: str, max_chars: int = 300,
+                   ellipsis: bool = True) -> str:
+    """Truncate text at the nearest sentence boundary."""
+    text = clean_transcript_noise(text)
+    if len(text) <= max_chars:
+        return text
+
+    window = text[:max_chars]
+    for delim in ['. ', '? ', '! ']:
+        idx = window.rfind(delim)
+        if idx > max_chars * 0.35:
+            return window[:idx + 1].strip()
+
+    for delim in [', ', '; ', ' -- ', ' - ']:
+        idx = window.rfind(delim)
+        if idx > max_chars * 0.4:
+            result = window[:idx + 1].strip()
+            return result + (' …' if ellipsis else '')
+
+    idx = window.rfind(' ')
+    if idx > 0:
+        result = window[:idx].rstrip('.,;:!?')
+        return result + (' …' if ellipsis else '')
+
+    return window
+
+
+# ─── Keyword-based tone classifier (no FinBERT needed) ───────────────
+
+_POSITIVE_KEYWORDS = [
+    'growth', 'strong', 'improved', 'robust', 'optimistic', 'record',
+    'expansion', 'momentum', 'outperform', 'accelerat', 'uptick',
+    'confident', 'resilient', 'healthy', 'upbeat', 'encouraging',
+    'breakout', 'milestone', 'exceed', 'surpass', 'beat',
+]
+_NEGATIVE_KEYWORDS = [
+    'decline', 'slowdown', 'headwind', 'risk', 'challenging',
+    'concern', 'pressure', 'uncertain', 'deteriorat', 'weak',
+    'cautious', 'muted', 'contraction', 'downturn', 'adversely',
+    'loss', 'impairment', 'default', 'bankruptcy', 'miss',
+]
+
+
+def _keyword_tone(text: str) -> tuple:
+    """Return (tone_label, score) based on positive/negative keyword density."""
+    lower = text.lower()
+    pos = sum(1 for kw in _POSITIVE_KEYWORDS if kw in lower)
+    neg = sum(1 for kw in _NEGATIVE_KEYWORDS if kw in lower)
+    total = pos + neg
+    if total == 0:
+        return ('NEUTRAL', 0.0)
+    score = round((pos - neg) / total, 4)
+    if score > 0.2:
+        return ('POSITIVE', score)
+    elif score < -0.2:
+        return ('NEGATIVE', score)
+    return ('NEUTRAL', score)
 
 
 # ─── Topic definitions with keyword patterns ─────────────────────────
@@ -92,17 +230,7 @@ class TextIntelligenceEngine:
     """
 
     def __init__(self):
-        self._sentiment = None
-
-    def _get_sentiment(self):
-        """Lazy-load FinBERT so import doesn't fail without torch."""
-        if self._sentiment is None:
-            try:
-                from qualitative.sentiment import SentimentAnalyzer
-                self._sentiment = SentimentAnalyzer()
-            except Exception:
-                self._sentiment = None
-        return self._sentiment
+        pass  # No external model dependencies
 
     def analyze(self, concall_texts: list = None,
                 ar_parsed: dict = None,
@@ -125,9 +253,8 @@ class TextIntelligenceEngine:
         """
         all_texts = []
 
-        # Import transcript cleaner
-        from qualitative.rag_engine import RAGEngine
-        _clean = RAGEngine.clean_transcript_noise
+        # Clean transcript noise using local utility
+        _clean = clean_transcript_noise
 
         # Collect all text sources
         if concall_texts:
@@ -196,25 +323,14 @@ class TextIntelligenceEngine:
             topic_analysis, ['Management Outlook', 'ESG & Sustainability',
                              'Revenue & Growth'])
 
-        # 4. Sentiment per topic (if FinBERT available)
-        sa = self._get_sentiment()
-        if sa and sa.available:
-            for topic, info in topic_analysis.items():
-                snippets = info.get('key_sentences', [])
-                if snippets:
-                    # Score the top 3 snippets
-                    top = snippets[:3]
-                    scores = []
-                    for s in top:
-                        res = sa.analyze(s)
-                        if res.get('available'):
-                            scores.append(res.get('score', 0))
-                    if scores:
-                        avg_score = sum(scores) / len(scores)
-                        info['sentiment_score'] = round(avg_score, 4)
-                        info['sentiment_tone'] = (
-                            'POSITIVE' if avg_score > 0.15 else
-                            ('NEGATIVE' if avg_score < -0.15 else 'NEUTRAL'))
+        # 4. Keyword-based tone per topic (no external model needed)
+        for topic, info in topic_analysis.items():
+            snippets = info.get('key_sentences', [])
+            if snippets:
+                combined_snippets = ' '.join(snippets[:5])
+                tone_label, tone_score = _keyword_tone(combined_snippets)
+                info['sentiment_score'] = tone_score
+                info['sentiment_tone'] = tone_label
 
         # 5. Overall tone from topic sentiments
         topic_sentiments = [v.get('sentiment_score', 0)
@@ -402,18 +518,9 @@ class TextIntelligenceEngine:
 
     @staticmethod
     def _smart_truncate(text: str, max_chars: int = 300) -> str:
-        """Return only *complete* sentences that fit within *max_chars*.
-
-        If no full sentence fits, take the first sentence (even if it
-        exceeds the budget slightly) and append an ellipsis.
-        """
+        """Return only *complete* sentences that fit within *max_chars*."""
         import re as _re
-        # Clean transcript noise
-        try:
-            from qualitative.rag_engine import RAGEngine
-            text = RAGEngine.clean_transcript_noise(text)
-        except Exception:
-            pass
+        text = clean_transcript_noise(text)
         text = text.strip()
         if len(text) <= max_chars:
             return text

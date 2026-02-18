@@ -147,17 +147,9 @@ class SynthesisAgent:
                 else:
                     thesis.append(f"Premium to sector P/E ({pe_prem:+.1f}%)")
 
-        # ── Sentiment ─────────────────────────────────────────
-        sentiment = analysis.get('sentiment', {})
-        if sentiment.get('available'):
-            tone = sentiment.get('tone')
-            if tone is not None:
-                max_score += 1
-                if tone in ('BULLISH', 'MILDLY POSITIVE'):
-                    score += 1
-                    thesis.append(f"Positive management tone ({tone})")
-                else:
-                    thesis.append(f"Management tone: {tone}")
+        # ── Sentiment (removed — RAG/FinBERT pipeline disabled) ────
+        # Management tone scoring will be re-added when AI model
+        # is integrated for document rephrasing.
 
         # ── Predictive trend ──────────────────────────────────
         prediction = analysis.get('prediction', {})

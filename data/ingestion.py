@@ -184,7 +184,8 @@ class DataIngestion:
     # Concall Transcript Text Downloader
     # ------------------------------------------------------------------
     def _download_transcripts(self, concall_links: dict,
-                               max_transcripts: int = 4) -> list:
+                               max_transcripts: int = 4,
+                               symbol: str = '') -> list:
         """
         Download concall transcript PDFs (from BSE India) and extract text.
 
@@ -197,6 +198,8 @@ class DataIngestion:
         Parameters:
             concall_links : {date_str: pdf_url} from scraper
             max_transcripts : max transcripts to download (latest first)
+            symbol : stock ticker used to namespace the transcript cache
+                     so that different companies don't share cached files.
 
         Returns:
             list of transcript text strings (latest first)
@@ -224,9 +227,14 @@ class DataIngestion:
             if not url:
                 continue
 
-            # Cache filename based on date and URL hash
+            # Cache filename: prefix with symbol to prevent cross-company
+            # cache collisions (e.g., RELIANCE_2025_04_01.txt)
             safe_name = re.sub(r'[^\w\-]', '_', date_key)
-            cache_file = os.path.join(cache_dir, f'{safe_name}.txt')
+            sym_prefix = re.sub(r'[^\w]', '', symbol.upper()) if symbol else ''
+            cache_file = os.path.join(
+                cache_dir,
+                f'{sym_prefix}_{safe_name}.txt' if sym_prefix else f'{safe_name}.txt'
+            )
 
             # Check cache first
             if os.path.exists(cache_file):
@@ -315,10 +323,10 @@ class DataIngestion:
 
     @staticmethod
     def _clean_transcript(text: str) -> str:
-        """Delegate to RAGEngine's transcript cleaner."""
+        """Delegate to text_intelligence's transcript cleaner."""
         try:
-            from qualitative.rag_engine import RAGEngine
-            return RAGEngine.clean_transcript_noise(text)
+            from qualitative.text_intelligence import clean_transcript_noise
+            return clean_transcript_noise(text)
         except Exception:
             return text
 
@@ -378,8 +386,8 @@ class DataIngestion:
         concall_texts = []
         if concall_links:
             print("    Downloading transcript text …")
-            concall_texts = self._download_transcripts(concall_links,
-                                                        max_transcripts=4)
+            concall_texts = self._download_transcripts(
+                concall_links, max_transcripts=4, symbol=symbol)
 
         print("  [10/11] Corporate Announcements (1 yr) …")
         try:

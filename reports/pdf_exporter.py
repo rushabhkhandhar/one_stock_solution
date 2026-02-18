@@ -252,7 +252,7 @@ def export_markdown_to_pdf(md_filepath: str, symbol: str,
                 '\u2192': '->',       # → right arrow
                 '\u2190': '<-',       # ← left arrow
                 # Typographic — replace here so unicode-font path also gets them
-                '\u2014': ' -- ',     # em dash —
+                '\u2014': '-',        # em dash —
                 '\u2013': '-',        # en dash –
                 # Colored circles — differentiated, minimal noise
                 '\U0001F534': '',     # 🔴 (removed — context is enough)
@@ -327,7 +327,10 @@ def export_markdown_to_pdf(md_filepath: str, symbol: str,
             text = (text.replace('Flls', 'FIIs')
                         .replace('Dils', 'DIIs')
                         .replace('FlIs', 'FIIs')
-                        .replace('DlIs', 'DIIs'))
+                        .replace('DlIs', 'DIIs')
+                        .replace('FIls', 'FIIs')
+                        .replace('DIls', 'DIIs')
+                        .replace('Flls', 'FIIs'))
             # Replace Cyrillic look-alikes that OCR/fonts may introduce
             text = (text.replace('\u0421', 'C')   # Cyrillic С → Latin C
                         .replace('\u0433', 'r')   # Cyrillic г → Latin r
@@ -440,6 +443,29 @@ def export_markdown_to_pdf(md_filepath: str, symbol: str,
                 surplus = page_w - total
                 for ci in range(num_cols):
                     col_widths[ci] += surplus * (col_widths[ci] / total)
+
+            # ── Post-scale: enforce minimum width per widest word ─
+            # Prevents short words (e.g. "PASS") from wrapping in
+            # narrow columns after proportional shrinking.
+            for ci in range(num_cols):
+                max_word_w = 0
+                for row in all_rows:
+                    if ci < len(row):
+                        txt = _strip_md(clean(row[ci]))
+                        for word in txt.split():
+                            ww = pdf_obj.get_string_width(word)
+                            max_word_w = max(max_word_w, ww)
+                needed = max_word_w + cell_pad * 2 + 1
+                if col_widths[ci] < needed:
+                    deficit = needed - col_widths[ci]
+                    col_widths[ci] = needed
+                    # Steal space from the widest column
+                    widest = max(range(num_cols),
+                                 key=lambda x: col_widths[x])
+                    if widest != ci:
+                        col_widths[widest] = max(
+                            col_widths[widest] - deficit,
+                            cell_pad * 2 + 5)
 
             # ── helper: compute row height for a list of cells ───
             def _row_height(cells):
@@ -554,16 +580,22 @@ def export_markdown_to_pdf(md_filepath: str, symbol: str,
             elif stripped.startswith('>'):
                 pdf._font('I', 9)
                 text = _strip_md(stripped[1:].strip())
+                _saved_lm = pdf.l_margin
+                pdf.set_left_margin(15)
                 pdf.set_x(15)
                 pdf.safe_multi_cell(175, 5, clean(text))
+                pdf.set_left_margin(_saved_lm)
                 pdf.ln(2)
 
             # List items
             elif stripped.startswith('- ') or stripped.startswith('* '):
                 pdf._font('', 10)
                 text = _strip_md(stripped[2:].strip())
+                _saved_lm = pdf.l_margin
+                pdf.set_left_margin(15)
                 pdf.set_x(15)
                 pdf.safe_multi_cell(175, 5, f"  - {clean(text)}")
+                pdf.set_left_margin(_saved_lm)
                 pdf.ln(1)
 
             # Separator lines
@@ -656,7 +688,7 @@ def _sanitize_for_latin(text: str) -> str:
     import re
     # ── Typographic replacements ──
     replacements = {
-        '\u2014': '--',    # em dash —
+        '\u2014': '-',     # em dash —
         '\u2013': '-',     # en dash –
         '\u2018': "'",     # left single quote '
         '\u2019': "'",     # right single quote '
@@ -702,6 +734,15 @@ def _sanitize_for_latin(text: str) -> str:
         '\u200C': '',        # zero-width non-joiner
         '\u200D': '',        # zero-width joiner
         '\uFEFF': '',        # BOM
+        # Minus sign (U+2212) — not in latin-1, would become '?'
+        '\u2212': '-',
+        # Cyrillic look-alikes — OCR/fonts sometimes introduce these
+        '\u0410': 'A', '\u0412': 'B', '\u0421': 'C', '\u0415': 'E',
+        '\u041D': 'H', '\u041A': 'K', '\u041C': 'M', '\u041E': 'O',
+        '\u0420': 'P', '\u0422': 'T', '\u0425': 'X',
+        '\u0430': 'a', '\u0435': 'e', '\u043E': 'o', '\u0440': 'p',
+        '\u0441': 'c', '\u0443': 'y', '\u0445': 'x',
+        '\u0433': 'r',   # Cyrillic г → Latin r  (the Сг → Cr fix)
     }
     for old, new in replacements.items():
         text = text.replace(old, new)

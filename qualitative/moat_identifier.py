@@ -59,7 +59,8 @@ MOAT_PATTERNS = {
     'Regulatory Moat': {
         'keywords': [
             'license', 'regulatory approval', 'government contract',
-            'monopoly', 'exclusive rights', 'concession', 'spectrum',
+            'monopoly', 'exclusive rights', 'concession',
+            'spectrum license', 'spectrum allocation', 'spectrum auction',
         ],
         'weight': 2,
     },

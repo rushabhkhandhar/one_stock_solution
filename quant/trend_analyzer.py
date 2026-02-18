@@ -59,6 +59,30 @@ class TrendAnalyzer:
         if pnl.empty:
             return {'available': False, 'reason': 'No P&L data'}
 
+        # ── Rule 4: Detect corporate-action distortions ──────
+        # If shares outstanding jumped > 80% YoY in a single year,
+        # it signals a bonus issue, stock split, or mega-merger.
+        # We flag this so the acceleration label is softened.
+        _corp_action_detected = False
+        _corp_action_year = None
+        try:
+            _shares = data.get('shares_outstanding')
+            if _shares is not None and isinstance(_shares, pd.Series):
+                _sh = _shares.dropna().tail(5)
+                if len(_sh) >= 2:
+                    for i in range(1, len(_sh)):
+                        _prev = float(_sh.iloc[i - 1])
+                        _curr = float(_sh.iloc[i])
+                        if _prev > 0 and abs(_curr / _prev - 1) > 0.80:
+                            _corp_action_detected = True
+                            _idx = _sh.index[i]
+                            _corp_action_year = (str(_idx.year)
+                                                 if hasattr(_idx, 'year')
+                                                 else str(_idx))
+                            break
+        except Exception:
+            pass
+
         trends = []
 
         # P&L trends
@@ -117,6 +141,20 @@ class TrendAnalyzer:
         if not trends:
             return {'available': False, 'reason': 'Insufficient data for trends'}
 
+        # ── Rule 4: Soften DECELERATING labels when corporate
+        #    action (bonus / split / merger) detected in window.
+        if _corp_action_detected:
+            _eps_affected = {'EPS', 'Revenue', 'Net Profit (PAT)',
+                             'Operating Profit'}
+            for t in trends:
+                if (t.get('acceleration') == 'DECELERATING'
+                        and t['label'] in _eps_affected):
+                    t['acceleration'] = 'DECELERATING_CORP_ACTION'
+                    t['corp_action_note'] = (
+                        f'Corporate action ({_corp_action_year}) expanded '
+                        f'the denominator base — deceleration is structural, '
+                        f'not fundamental deterioration.')
+
         # Overall health assessment — direction from proportion of improving metrics
         directions = [t['direction'] for t in trends]
         improving = sum(1 for d in directions if d == 'UP')
@@ -149,6 +187,8 @@ class TrendAnalyzer:
             'health_score': health,
             'summary': " | ".join(summary_parts),
             'num_years': min(5, max((t.get('data_points', 0) for t in trends), default=0)),
+            'corp_action_detected': _corp_action_detected,
+            'corp_action_year': _corp_action_year,
         }
 
     # ------------------------------------------------------------------

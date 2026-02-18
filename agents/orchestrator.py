@@ -11,8 +11,8 @@ Coordinates all analysis modules in a clean, unified pipeline:
   Phase 3.5 → Forensic Deep Dive (RPT, Contingent, Auditor)
   Phase 3.6 → Segmental + SOTP Valuation + Governance + ESG
   Phase 3.9 → Forensic Dashboard (Unified Earnings Quality)
-  Phase 4   → Qualitative Intelligence (Sentiment, RAG, Text Intel, Moat)
-  Phase 4.6 → Text Intelligence Engine
+  Phase 4   → Qualitative Intelligence (Document Extraction Only)
+  Phase 4.6 → Text Intelligence Engine (keyword-based)
   Phase 4.7 → Say-Do Ratio (Management Credibility)
   Phase 5   → Technical & Predictive (Technicals, ARIMA, Macro-ARDL)
   Phase 6   → Synthesis (Buy / Hold / Sell rating)
@@ -42,7 +42,6 @@ from quant.forensic_dashboard import ForensicDashboard
 from predictive.arima_ets import HybridPredictor
 from predictive.flow_correlation import FlowCorrelation
 from predictive.macro_engine import MacroCorrelationEngine
-from agents.rag_agent import RAGAgent
 from agents.synthesis_agent import SynthesisAgent
 from compliance.cross_validator import CrossValidator
 from compliance.safety import KillSwitch, stamp_source
@@ -81,7 +80,6 @@ class Orchestrator:
         self.layout_parser    = LayoutAwareParser()
         self.predictor        = HybridPredictor()
         self.flow_corr        = FlowCorrelation()
-        self.rag_agent        = RAGAgent()
         self.synthesis        = SynthesisAgent()
         self.cross_validator  = CrossValidator()
         self.kill_switch      = KillSwitch()
@@ -121,11 +119,30 @@ class Orchestrator:
         print("\n🔢  PHASE 2 — Core Quantitative Analysis")
         analysis = {}
 
+        # Resolve sector early (lightweight yfinance call) so DCF
+        # can skip for banks/NBFCs before burning compute time.
+        _sector_early = ''
+        try:
+            import yfinance as _yf, io as _io, sys as _sys
+            _old = _sys.stderr; _sys.stderr = _io.StringIO()
+            try:
+                _tk = _yf.Ticker(f"{data.get('symbol', stock_name)}.BO")
+                _info = _tk.info or {}
+            finally:
+                _sys.stderr = _old
+            _sector_early = _info.get('sector', '')
+            _industry_early = _info.get('industry', '')
+            analysis['sector'] = _sector_early
+            analysis['industry'] = _industry_early
+        except Exception:
+            analysis['sector'] = ''
+            analysis['industry'] = ''
+
         print("  ▸ Financial Ratios …")
         analysis['ratios'] = self.ratios_calc.calculate(data)
 
         print("  ▸ DCF Valuation …")
-        analysis['dcf'] = self.dcf_model.calculate(data)
+        analysis['dcf'] = self.dcf_model.calculate(data, sector=_sector_early)
 
         print("  ▸ Beneish M-Score …")
         analysis['mscore'] = self.mscore_model.calculate(data)
@@ -275,7 +292,15 @@ class Orchestrator:
         # RPT Structured Analysis
         print("  ▸ Related Party Transactions …")
         try:
-            analysis['rpt'] = self.forensic_extras.extract_rpt(ar_parsed, data)
+            # Rule 3: Pass holding-company context for RPT severity
+            # contextualisation.  At this point segmental_layout
+            # (Phase 2.6) may be available; full segmental comes in 3.6.
+            _seg_layout = analysis.get('segmental_layout', {})
+            _n_seg_early = len(_seg_layout.get('segments', []))
+            analysis['rpt'] = self.forensic_extras.extract_rpt(
+                ar_parsed, data,
+                sotp_available=False,  # SOTP runs later in 3.6
+                num_segments=_n_seg_early)
             rpt = analysis['rpt']
             if rpt.get('available'):
                 print(f"  ✔ RPT: {rpt.get('flag', 'Analyzed')}")
@@ -346,6 +371,25 @@ class Orchestrator:
             analysis['segmental'] = {'available': False, 'reason': str(e)}
             analysis['sotp'] = {'available': False, 'reason': str(e)}
 
+        # Rule 3: Retroactively enrich RPT with SOTP/segment context
+        # now that Phase 3.6 has run.
+        _rpt = analysis.get('rpt', {})
+        _sotp_avail = analysis.get('sotp', {}).get('available', False)
+        _full_seg = analysis.get('segmental', {}).get('segments', [])
+        _n_full_seg = len(_full_seg) if _full_seg else 0
+        if (_rpt.get('available') and not _rpt.get('is_holding_structure')
+                and (_sotp_avail or _n_full_seg >= 3)):
+            # Re-run RPT with updated holding context
+            try:
+                analysis['rpt'] = self.forensic_extras.extract_rpt(
+                    ar_parsed, data,
+                    sotp_available=_sotp_avail,
+                    num_segments=_n_full_seg)
+                print(f"  ✔ RPT re-evaluated with holding-company context "
+                      f"(segments={_n_full_seg}, SOTP={_sotp_avail})")
+            except Exception:
+                pass  # keep original RPT result
+
         # ── Phase 3.7: Governance Dashboard ──────────────────
         print("\n🏛️  PHASE 3.7 — Corporate Governance")
         try:
@@ -398,26 +442,16 @@ class Orchestrator:
         except Exception as e:
             analysis['forensic_dashboard'] = {'available': False, 'reason': str(e)}
 
-        # ── Phase 4: Qualitative Intelligence ────────────────
-        print("\n🧠  PHASE 4 — Qualitative Intelligence")
-        try:
-            qual_data = {
-                'concall_texts': data.get('concall_texts', []),
-                'announcements': data.get('announcements', []),
-            }
-            analysis['qualitative'] = self.rag_agent.run(qual_data)
-            sent = analysis['qualitative'].get('sentiment', {})
-            if sent.get('available'):
-                print(f"  ✔ Sentiment: {sent.get('tone', 'N/A')} "
-                      f"(score: {sent.get('overall_score', 'N/A')})")
-            else:
-                print("  ⚠ Sentiment analysis not available (no transcript text)")
-        except Exception as e:
-            print(f"  ⚠ Qualitative analysis error: {e}")
-            analysis['qualitative'] = {'available': False, 'reason': str(e)}
-
-        # Expose sentiment at top level for synthesis
-        analysis['sentiment'] = analysis.get('qualitative', {}).get('sentiment', {})
+        # ── Phase 4: Qualitative Intelligence (document-only) ─
+        # RAG / FinBERT removed — all qualitative analysis now uses
+        # direct keyword extraction from scraped documents.
+        print("\n🧠  PHASE 4 — Qualitative Intelligence (document extraction)")
+        analysis['qualitative'] = {
+            'available': False,
+            'reason': 'RAG pipeline removed; using document-level extraction only '
+                      '(see Text Intelligence, Moat, and Say-Do sections).',
+        }
+        analysis['sentiment'] = {'available': False}
 
         # ── Phase 4.5: Moat Identification ───────────────────
         print("\n🏰  PHASE 4.5 — Competitive Moat Identification")
