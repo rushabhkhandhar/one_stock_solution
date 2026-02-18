@@ -96,8 +96,11 @@ class ManagementTracker:
             cur_sent = self._sentiment.analyze(chunk['text'])
             pri_sent = self._sentiment.analyze(prior_text)
 
-            cur_score = cur_sent.get('score', 0.0) if cur_sent.get('available') else 0.0
-            pri_score = pri_sent.get('score', 0.0) if pri_sent.get('available') else 0.0
+            # Skip when sentiment analysis is unavailable
+            if not cur_sent.get('available') or not pri_sent.get('available'):
+                continue
+            cur_score = cur_sent['score']
+            pri_score = pri_sent['score']
             delta = SentimentAnalyzer.compute_delta(cur_score, pri_score)
 
             comparisons.append({
@@ -111,9 +114,11 @@ class ManagementTracker:
 
         # 4. Build summary
         deltas = [c['delta']['delta'] for c in comparisons]
-        avg_delta = round(sum(deltas) / len(deltas), 4) if deltas else 0
+        avg_delta = round(sum(deltas) / len(deltas), 4) if deltas else None
 
-        if avg_delta < -0.10:
+        if avg_delta is None:
+            summary = '⚪ Sentiment comparison not available — insufficient data for delta computation.'
+        elif avg_delta < -0.10:
             summary = '🔴 Management tone has deteriorated significantly versus prior quarters.'
         elif avg_delta < -0.03:
             summary = '🟡 Slight caution detected in management guidance compared to prior periods.'

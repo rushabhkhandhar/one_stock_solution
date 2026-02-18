@@ -69,13 +69,18 @@ class SegmentalAnalysis:
                     s['revenue_pct'] = round(s['revenue'] / total_rev * 100, 1)
 
         # Identify dominant segment and concentration risk
+        # Use HHI (Herfindahl-Hirschman Index) for data-driven concentration
         dominant = max(segments, key=lambda x: x.get('revenue', 0)) if segments else None
         concentration = None
         if dominant and dominant.get('revenue_pct'):
-            pct = dominant['revenue_pct']
-            if pct > 80:
+            # Compute HHI from all segment shares
+            shares = [s.get('revenue_pct', 0) for s in segments if s.get('revenue_pct')]
+            hhi = sum(s**2 for s in shares)
+            # HHI ranges: 10000 = single segment, lower = more diversified
+            # Natural tiers: >6000 = HIGH, >3000 = MEDIUM, else LOW
+            if hhi > 6000:
                 concentration = 'HIGH'
-            elif pct > 60:
+            elif hhi > 3000:
                 concentration = 'MEDIUM'
             else:
                 concentration = 'LOW'

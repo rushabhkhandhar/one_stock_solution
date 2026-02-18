@@ -66,14 +66,15 @@ class FlowCorrelation:
         min_corr     = round(float(rolling_corr.min()), 4)
         max_corr     = round(float(rolling_corr.max()), 4)
 
-        # Regime classification
-        if current_corr > 0.7:
+        # Regime classification — thresholds derived from data distribution
+        corr_std = float(rolling_corr.std())
+        if current_corr > avg_corr + corr_std:
             regime = 'HIGHLY CORRELATED — moves with market'
-        elif current_corr > 0.4:
+        elif current_corr > avg_corr:
             regime = 'MODERATELY CORRELATED'
-        elif current_corr > 0.1:
+        elif current_corr > avg_corr - corr_std:
             regime = 'LOW CORRELATION — idiosyncratic driver'
-        elif current_corr > -0.1:
+        elif current_corr > avg_corr - 2 * corr_std:
             regime = 'DECORRELATED — stock-specific factors dominate'
         else:
             regime = 'NEGATIVE CORRELATION — contrarian to market'

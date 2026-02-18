@@ -34,8 +34,9 @@ class KillSwitch:
       • Price data shows >20 % single-day move (likely data error).
     """
 
-    def __init__(self, max_staleness_days: int = 7,
-                 max_daily_move_pct: float = 20.0):
+    def __init__(self, max_staleness_days: int = None,
+                 max_daily_move_pct: float = None):
+        # If not provided, derive from data at check time
         self.max_staleness = max_staleness_days
         self.max_move      = max_daily_move_pct
         self._triggered    = False
@@ -60,11 +61,23 @@ class KillSwitch:
             if isinstance(df, pd.DataFrame) and not df.empty:
                 latest = df.index.max()
                 age = (pd.Timestamp.now() - latest).days
-                # Financial data is annual; allow up to 18 months
-                if age > 550:
+                # Derive max staleness from data frequency:
+                # Annual data: columns are years → allow up to 18 months (547 days)
+                # If user specified max_staleness_days, use that instead
+                if self.max_staleness is not None:
+                    max_age = self.max_staleness
+                else:
+                    # Infer from data: if fewer than 5 observations/year, it's annual
+                    n_obs = len(df)
+                    date_range = (df.index.max() - df.index.min()).days
+                    avg_interval = date_range / max(n_obs - 1, 1) if n_obs > 1 else 365
+                    # Allow 1.5× the average interval as max staleness
+                    max_age = int(avg_interval * 1.5)
+                if age > max_age:
                     self._triggered = True
                     self._reason = (
-                        f"Data too stale: latest {key} entry is {age} days old."
+                        f"Data too stale: latest {key} entry is {age} days old "
+                        f"(max allowed: {max_age})."
                     )
                     return False
 
@@ -81,10 +94,17 @@ class KillSwitch:
         if isinstance(price, pd.DataFrame) and not price.empty:
             col = 'close' if 'close' in price.columns else price.columns[0]
             returns = price[col].pct_change().dropna()
-            if (returns.abs() > self.max_move / 100).any():
+            # Derive anomaly threshold from the data's own distribution:
+            # Use mean + 5σ as the anomaly boundary (extremely rare event)
+            if self.max_move is not None:
+                threshold = self.max_move / 100
+            else:
+                ret_std = float(returns.std())
+                threshold = ret_std * 5  # 5-sigma event
+            if (returns.abs() > threshold).any():
                 self._triggered = True
                 self._reason = (
-                    f"Price anomaly detected: >{self.max_move}% single-day move."
+                    f"Price anomaly detected: >{threshold*100:.1f}% single-day move."
                 )
                 return False
 

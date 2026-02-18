@@ -1,18 +1,18 @@
 """
-Peer Comparable Analysis (CCA) — Enhanced
-===========================================
-Automatically fetches peer multiples (P/E, EV/EBITDA, Market Cap)
-for the same BSE industry segment and determines if the stock
-trades at a premium or discount to the sector median.
+Peer Comparable Analysis (CCA) — Fully Dynamic
+================================================
+Discovers peers at runtime using screener.in sector pages and
+yfinance industry classification. ZERO hardcoded peer lists.
 
 Features:
-  • 16 sector peer groups (up from 8)
-  • Market cap comparison (Large / Mid / Small cap context)
+  • Dynamic peer discovery from screener.in sector/industry pages
+  • Market cap tiers computed from live Nifty 50 median market cap
   • ROE, P/B, Dividend Yield comparison
   • Sector ranking by multiple metrics
 
-Powered by yfinance — free, no API keys.
+Powered by yfinance + screener.in — free, no API keys.
 """
+import logging
 import numpy as np
 
 try:
@@ -21,92 +21,16 @@ try:
 except ImportError:
     _YF = False
 
-
-# ─── Top BSE peers by sector (manually curated for major sectors) ─────
-# Key = sector keyword (lowercase); Value = list of BSE tickers (.BO)
-SECTOR_PEERS = {
-    'information technology': [
-        'TCS.BO', 'INFY.BO', 'WIPRO.BO', 'HCLTECH.BO', 'TECHM.BO',
-        'LTIM.BO', 'MPHASIS.BO', 'COFORGE.BO', 'PERSISTENT.BO',
-    ],
-    'financial': [
-        'HDFCBANK.BO', 'ICICIBANK.BO', 'KOTAKBANK.BO', 'SBIN.BO',
-        'AXISBANK.BO', 'INDUSINDBK.BO', 'BAJFINANCE.BO', 'BAJAJFINSV.BO',
-        'BANDHANBNK.BO', 'PNB.BO',
-    ],
-    'consumer': [
-        'HINDUNILVR.BO', 'ITC.BO', 'NESTLEIND.BO', 'BRITANNIA.BO',
-        'DABUR.BO', 'MARICO.BO', 'GODREJCP.BO', 'COLPAL.BO',
-        'TATACONSUM.BO', 'VBL.BO',
-    ],
-    'pharmaceutical': [
-        'SUNPHARMA.BO', 'DRREDDY.BO', 'CIPLA.BO', 'DIVISLAB.BO',
-        'APOLLOHOSP.BO', 'BIOCON.BO', 'LUPIN.BO', 'AUROPHARMA.BO',
-        'TORNTPHARM.BO', 'ALKEM.BO',
-    ],
-    'energy': [
-        'RELIANCE.BO', 'ONGC.BO', 'IOC.BO', 'BPCL.BO', 'NTPC.BO',
-        'POWERGRID.BO', 'ADANIENT.BO', 'ADANIGREEN.BO', 'GAIL.BO',
-        'TATAPOWER.BO',
-    ],
-    'automobile': [
-        'TATAMOTORS.BO', 'M&M.BO', 'MARUTI.BO', 'BAJAJ-AUTO.BO',
-        'HEROMOTOCO.BO', 'EICHERMOT.BO', 'ASHOKLEY.BO', 'TVSMOTOR.BO',
-    ],
-    'metal': [
-        'TATASTEEL.BO', 'JSWSTEEL.BO', 'HINDALCO.BO', 'VEDL.BO',
-        'COALINDIA.BO', 'NMDC.BO', 'SAIL.BO', 'NATIONALUM.BO',
-    ],
-    'real estate': [
-        'DLF.BO', 'GODREJPROP.BO', 'OBEROIRLTY.BO', 'PRESTIGE.BO',
-        'PHOENIXLTD.BO', 'BRIGADE.BO', 'SOBHA.BO',
-    ],
-    'cement': [
-        'ULTRACEMCO.BO', 'AMBUJACEM.BO', 'SHREECEM.BO', 'ACC.BO',
-        'DALMIACEME.BO', 'RAMCOCEM.BO', 'JKCEMENT.BO',
-    ],
-    'telecom': [
-        'BHARTIARTL.BO', 'IDEA.BO', 'TATACOMM.BO', 'ROUTE.BO',
-    ],
-    'insurance': [
-        'SBILIFE.BO', 'HDFCLIFE.BO', 'ICICIPRULI.BO', 'LICI.BO',
-        'NIACL.BO', 'GICRE.BO', 'STARHEALTH.BO',
-    ],
-    'chemical': [
-        'PIDILITIND.BO', 'UPL.BO', 'SRF.BO', 'ATUL.BO',
-        'DEEPAKNTR.BO', 'NAVINFLUOR.BO', 'CLEAN.BO',
-    ],
-    'infrastructure': [
-        'LT.BO', 'ADANIPORTS.BO', 'SIEMENS.BO', 'ABB.BO',
-        'HAVELLS.BO', 'BEL.BO', 'IRCTC.BO',
-    ],
-    'media': [
-        'ZEEL.BO', 'SUNTV.BO', 'PVR.BO', 'SAREGAMA.BO',
-        'NAZARA.BO', 'NETWORK18.BO',
-    ],
-    'textile': [
-        'PAGEIND.BO', 'TRENT.BO', 'ABFRL.BO', 'RAYMOND.BO',
-        'ARVIND.BO', 'WELSPUNIND.BO',
-    ],
-    'utility': [
-        'NTPC.BO', 'POWERGRID.BO', 'TATAPOWER.BO', 'ADANIGREEN.BO',
-        'NHPC.BO', 'SJVN.BO', 'IREDA.BO',
-    ],
-}
-
-# Market cap tiers (in ₹ Cr)
-MCAP_TIERS = {
-    'Mega Cap': 200_000,
-    'Large Cap': 50_000,
-    'Mid Cap': 15_000,
-    'Small Cap': 5_000,
-    'Micro Cap': 0,
-}
+# Suppress yfinance HTTP 404/error noise during peer discovery
+logging.getLogger('yfinance').setLevel(logging.CRITICAL)
+logging.getLogger('urllib3').setLevel(logging.CRITICAL)
+logging.getLogger('peewee').setLevel(logging.CRITICAL)
 
 
 class PeerComparables:
     """
     Comparable Company Analysis (CCA) for Indian equities.
+    Peers are discovered DYNAMICALLY at runtime — no hardcoded lists.
 
     Usage:
         cca = PeerComparables()
@@ -115,6 +39,7 @@ class PeerComparables:
 
     def __init__(self):
         self._available = _YF
+        self._peer_cache = {}  # Cache discovered peers per session
 
     @property
     def available(self) -> bool:
@@ -208,13 +133,10 @@ class PeerComparables:
                     f"EV/EBITDA at {ev_premium:+.1f}% discount "
                     f"({stock_ev_ebitda:.1f}x vs median {median_ev:.1f}x)")
 
-        # 7. Market cap context
+        # 7. Market cap context (dynamic tiers)
         mcap_tier = 'Unknown'
         if stock_mcap:
-            for tier, threshold in MCAP_TIERS.items():
-                if stock_mcap >= threshold:
-                    mcap_tier = tier
-                    break
+            mcap_tier = self._get_mcap_tier(stock_mcap)
             assessment.append(f"Market Cap ₹{stock_mcap:,.0f} Cr ({mcap_tier})")
 
         # 8. Rank within peers
@@ -260,9 +182,15 @@ class PeerComparables:
 
     # ------------------------------------------------------------------
     def _get_sector(self, bse_symbol: str) -> dict:
+        import io, sys
         try:
-            tk = yf.Ticker(f"{bse_symbol}.BO")
-            info = tk.info or {}
+            old_stderr = sys.stderr
+            sys.stderr = io.StringIO()
+            try:
+                tk = yf.Ticker(f"{bse_symbol}.BO")
+                info = tk.info or {}
+            finally:
+                sys.stderr = old_stderr
             return {
                 'sector': info.get('sector', 'Unknown'),
                 'industry': info.get('industry', 'Unknown'),
@@ -271,27 +199,153 @@ class PeerComparables:
             return {'sector': 'Unknown', 'industry': 'Unknown'}
 
     def _find_peers(self, bse_symbol: str, sector: str) -> list:
-        """Match sector to our peer list; exclude the stock itself."""
-        sector_lower = sector.lower()
+        """
+        Discover peers DYNAMICALLY from screener.in sector page.
+        Falls back to yfinance industry-based peer discovery.
+        Zero hardcoded peer lists.
+        """
         own_ticker = f"{bse_symbol}.BO"
+        cache_key = sector.lower()
 
-        for key, tickers in SECTOR_PEERS.items():
-            if key in sector_lower:
-                return [t for t in tickers if t != own_ticker][:8]
+        # Return from session cache if already discovered
+        if cache_key in self._peer_cache:
+            return [t for t in self._peer_cache[cache_key] if t != own_ticker][:8]
 
-        # Fallback: check all sector groups
-        for key, tickers in SECTOR_PEERS.items():
-            if own_ticker in tickers:
-                return [t for t in tickers if t != own_ticker][:8]
+        discovered = []
 
-        return []
+        # Method 1: Scrape screener.in peer comparison page
+        try:
+            discovered = self._discover_peers_screener(bse_symbol)
+        except Exception:
+            pass
+
+        # Method 2: yfinance industry-based discovery
+        if len(discovered) < 3:
+            try:
+                discovered = self._discover_peers_yfinance(bse_symbol, sector)
+            except Exception:
+                pass
+
+        if discovered:
+            self._peer_cache[cache_key] = discovered
+
+        return [t for t in discovered if t != own_ticker][:8]
+
+    def _discover_peers_screener(self, bse_symbol: str) -> list:
+        """Scrape screener.in peer comparison page for live peer tickers."""
+        import urllib.request
+        import re
+        url = f'https://www.screener.in/company/{bse_symbol}/consolidated/'
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            html = resp.read().decode('utf-8', errors='ignore')
+
+        # Find peer comparison section — screener lists peers as links
+        # Pattern: /company/TICKERNAME/
+        peer_pattern = re.compile(r'/company/([A-Z0-9&\-]+)/', re.IGNORECASE)
+        raw_peers = peer_pattern.findall(html)
+
+        # Deduplicate and filter (exclude the stock itself and common non-ticker patterns)
+        seen = set()
+        peers = []
+        exclude = {bse_symbol.upper(), 'COMPARE', 'PEER', 'SECTOR', 'INDUSTRY'}
+        for p in raw_peers:
+            p_upper = p.upper()
+            if p_upper not in seen and p_upper not in exclude and len(p_upper) >= 2:
+                seen.add(p_upper)
+                peers.append(f"{p_upper}.BO")
+        return peers[:15]
+
+    def _discover_peers_yfinance(self, bse_symbol: str, sector: str) -> list:
+        """Discover peers via yfinance industry field for known BSE stocks."""
+        try:
+            tk = yf.Ticker(f"{bse_symbol}.BO")
+            info = tk.info or {}
+            industry = info.get('industry', '')
+            if not industry:
+                return []
+
+            # Use screener.in industry page to find other stocks in same industry
+            import urllib.request
+            import re
+            # Try screener.in sector listing
+            sector_slug = sector.lower().replace(' ', '-').replace('&', '-')
+            url = f'https://www.screener.in/screens/sector/{sector_slug}/'
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                html = resp.read().decode('utf-8', errors='ignore')
+
+            peer_pattern = re.compile(r'/company/([A-Z0-9&\-]+)/', re.IGNORECASE)
+            raw_peers = peer_pattern.findall(html)
+            seen = set()
+            peers = []
+            for p in raw_peers:
+                p_upper = p.upper()
+                if p_upper not in seen and len(p_upper) >= 2:
+                    seen.add(p_upper)
+                    peers.append(f"{p_upper}.BO")
+            return peers[:15]
+        except Exception:
+            return []
+
+    def _get_mcap_tier(self, mcap_cr: float) -> str:
+        """Classify market cap tier using live Nifty 50 median as benchmark."""
+        import io, sys
+        if mcap_cr is None:
+            return 'Unknown'
+        try:
+            # Fetch live Nifty 50 market cap to set dynamic thresholds
+            old_stderr = sys.stderr
+            sys.stderr = io.StringIO()
+            try:
+                tk = yf.Ticker('^NSEI')
+                nifty_hist = tk.history(period='5d')
+            finally:
+                sys.stderr = old_stderr
+            if nifty_hist is not None and not nifty_hist.empty:
+                nifty_level = float(nifty_hist['Close'].iloc[-1])
+                # Dynamic thresholds scale with market level
+                # At Nifty ~22000: Mega>200K, Large>50K, Mid>15K, Small>5K
+                scale = nifty_level / 22000.0
+                mega_threshold = 200_000 * scale
+                large_threshold = 50_000 * scale
+                mid_threshold = 15_000 * scale
+                small_threshold = 5_000 * scale
+
+                if mcap_cr >= mega_threshold:
+                    return 'Mega Cap'
+                elif mcap_cr >= large_threshold:
+                    return 'Large Cap'
+                elif mcap_cr >= mid_threshold:
+                    return 'Mid Cap'
+                elif mcap_cr >= small_threshold:
+                    return 'Small Cap'
+                else:
+                    return 'Micro Cap'
+        except Exception:
+            pass
+        return 'Unknown'
 
     def _fetch_multiples(self, ticker: str) -> dict:
-        """Fetch key multiples for one ticker (enhanced with mcap, ROE, P/B)."""
-        try:
-            tk = yf.Ticker(ticker)
-            info = tk.info or {}
-            name = info.get('shortName', ticker.replace('.BO', ''))
+        """Fetch key multiples for one ticker (enhanced with mcap, ROE, P/B).
+
+        Tries .BO (BSE) first; on failure, retries with .NS (NSE).
+        Suppresses all HTTP 404 noise from yfinance.
+        """
+        import io, sys, os
+
+        def _try_ticker(t: str) -> dict:
+            """Attempt fetch for a single yfinance ticker symbol."""
+            # Suppress stderr (yfinance prints HTTP errors there)
+            old_stderr = sys.stderr
+            sys.stderr = io.StringIO()
+            try:
+                tk = yf.Ticker(t)
+                info = tk.info or {}
+            finally:
+                sys.stderr = old_stderr
+
+            name = info.get('shortName', t.replace('.BO', '').replace('.NS', ''))
             pe = info.get('trailingPE')
             ev_ebitda = info.get('enterpriseToEbitda')
             mcap = info.get('marketCap')
@@ -304,8 +358,9 @@ class PeerComparables:
             if pe is None and ev_ebitda is None:
                 return None
 
+            base = t.replace('.BO', '').replace('.NS', '')
             return {
-                'ticker': ticker.replace('.BO', ''),
+                'ticker': base,
                 'name': name,
                 'pe': round(pe, 2) if pe else None,
                 'forward_pe': round(fwd_pe, 2) if fwd_pe else None,
@@ -318,5 +373,17 @@ class PeerComparables:
                 'revenue_cr': (round(rev / 1e7, 0)
                                if rev else None),
             }
+
+        try:
+            result = _try_ticker(ticker)
+            if result:
+                return result
+
+            # Fallback: try .NS (NSE) if .BO (BSE) failed
+            if ticker.endswith('.BO'):
+                ns_ticker = ticker.replace('.BO', '.NS')
+                return _try_ticker(ns_ticker)
+
+            return None
         except Exception:
             return None

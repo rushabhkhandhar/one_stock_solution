@@ -110,6 +110,23 @@ class ForensicExtras:
         if total_cl > 0 and not np.isnan(net_worth) and net_worth > 0:
             cl_pct = round(total_cl / net_worth * 100, 2)
 
+        # ── Sanity bound: if extracted CL > 150% of net worth,
+        #    it's almost certainly a text-extraction artefact
+        #    (e.g. picking up unrelated numbers from AR text).
+        #    Flag as unreliable rather than reporting a hallucinated figure.
+        if cl_pct is not None and cl_pct > 150:
+            return {
+                'available': True,
+                'total_contingent': total_cl,
+                'contingent_as_pct_networth': None,  # suppress the hallucinated %
+                'severity': 'DATA_QUALITY',
+                'data_quality_issue': True,
+                'detail': (f'Extracted contingent amount (₹{total_cl:,.0f} Cr, '
+                           f'{cl_pct:.0f}% of net worth) exceeds plausibility '
+                           'bound — likely a text-extraction error. '
+                           'Could not quantify contingent liabilities reliably.'),
+            }
+
         if cl_pct is not None:
             if cl_pct > 50:
                 severity = 'CRITICAL'

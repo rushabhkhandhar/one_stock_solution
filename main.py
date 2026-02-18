@@ -11,6 +11,18 @@
 ═══════════════════════════════════════════════════════════
 """
 import sys
+import os
+
+# ── Auto-activate .venv if running from system Python ─────
+_venv_python = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), '.venv', 'bin', 'python')
+if (
+    os.path.exists(_venv_python)
+    and os.path.abspath(sys.executable) != os.path.abspath(_venv_python)
+    and 'VIRTUAL_ENV' not in os.environ
+):
+    os.execv(_venv_python, [_venv_python] + sys.argv)
+
 from agents.orchestrator import Orchestrator
 
 

@@ -199,10 +199,26 @@ class PDFParser:
             'financial_overview': 'financial_overview',
         }
 
+        # --- Exclude opposite-statement pages (same logic as key figures) ---
+        opposite = 'standalone' if prefix == 'consolidated' else 'consolidated'
+        opposite_pages = set(
+            sections.get(f'{opposite}_pnl', []) +
+            sections.get(f'{opposite}_cf', []) +
+            sections.get(f'{opposite}_bs', [])
+        )
+        prefix_pages = set(
+            sections.get(f'{prefix}_pnl', []) +
+            sections.get(f'{prefix}_cf', []) +
+            sections.get(f'{prefix}_bs', [])
+        )
+        ambiguous_pages = prefix_pages & opposite_pages
+        exclude_pages = opposite_pages | ambiguous_pages
+
         pdf = pdfplumber.open(pdf_path)
 
         for label, section_key in targets.items():
             pages = sections.get(section_key, [])
+            pages = [p for p in pages if p not in exclude_pages]
             if not pages:
                 continue
 
@@ -377,12 +393,31 @@ class PDFParser:
             sections.get(f'{prefix}_bs', [])
         )
 
+        # --- Exclude pages belonging to the *opposite* statement type ---
+        # E.g. when prefix='consolidated', drop pages also in standalone
+        opposite = 'standalone' if prefix == 'consolidated' else 'consolidated'
+        opposite_pages = set(
+            sections.get(f'{opposite}_pnl', []) +
+            sections.get(f'{opposite}_cf', []) +
+            sections.get(f'{opposite}_bs', [])
+        )
+        # Pages appearing in BOTH consolidated AND standalone are usually
+        # Table-of-Contents / index pages — exclude them too.
+        prefix_pages = set(
+            sections.get(f'{prefix}_pnl', []) +
+            sections.get(f'{prefix}_cf', []) +
+            sections.get(f'{prefix}_bs', [])
+        )
+        ambiguous_pages = prefix_pages & opposite_pages  # TOC-like pages
+        exclude = opposite_pages | ambiguous_pages
+        target_pages = [p for p in target_pages if p not in exclude]
+
         rev_pat = re.compile(
             r'revenue\s+from\s+operations?\s*'
-            r'[\s\S]{0,50}?([\d,]+(?:\.\d+)?)', re.I)
+            r'[\s\S]{0,80}?([\d,]*\d{3,}(?:\.\d+)?)', re.I)
         pat_pat = re.compile(
             r'profit\s+(?:after\s+tax|for\s+the\s+(?:year|period))'
-            r'\s*[\s\S]{0,80}?([\d,]+(?:\.\d+)?)', re.I)
+            r'\s*[\s\S]{0,80}?([\d,]*\d{3,}(?:\.\d+)?)', re.I)
         eps_pat = re.compile(
             r'(?:basic\s+)?earnings\s+per\s+(?:equity\s+)?share'
             r'\s*[\s\S]{0,80}?([\d,]+\.\d+)', re.I)

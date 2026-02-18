@@ -49,10 +49,30 @@ class TechnicalAnalyzer:
             return {'available': False,
                     'reason': 'Insufficient price data (need ≥ 30 bars)'}
 
-        close = price_df['close'].astype(float)
-        high = price_df['high'].astype(float)
-        low = price_df['low'].astype(float)
-        volume = price_df['volume'].astype(float)
+        # Normalise column names to lowercase
+        df = price_df.copy()
+        df.columns = [c.lower().strip() for c in df.columns]
+
+        if 'close' not in df.columns:
+            return {'available': False, 'reason': "Missing 'close' column"}
+
+        close = df['close'].astype(float)
+
+        # high / low may be absent in screener.in weekly data — estimate
+        if 'high' in df.columns:
+            high = df['high'].astype(float)
+        else:
+            high = close  # best available proxy
+
+        if 'low' in df.columns:
+            low = df['low'].astype(float)
+        else:
+            low = close
+
+        has_ohlc = ('high' in df.columns and 'low' in df.columns)
+
+        volume = df['volume'].astype(float) if 'volume' in df.columns else pd.Series(
+            0, index=close.index, dtype=float)
 
         result = {'available': True, 'symbol': symbol}
 
@@ -66,7 +86,7 @@ class TechnicalAnalyzer:
         result['volume_analysis'] = self._volume_analysis(close, volume)
 
         # ── Volatility ───────────────────────────────────────
-        result['volatility'] = self._volatility_analysis(close, high, low)
+        result['volatility'] = self._volatility_analysis(close, high, low, has_ohlc)
 
         # ── Overall Signal ───────────────────────────────────
         result['overall_signal'] = self._composite_signal(result)
@@ -270,9 +290,12 @@ class TechnicalAnalyzer:
     # Volatility
     # ==================================================================
     def _volatility_analysis(self, close: pd.Series,
-                             high: pd.Series, low: pd.Series) -> dict:
+                             high: pd.Series, low: pd.Series,
+                             has_ohlc: bool = True) -> dict:
         n = len(close)
         volatility = {'available': True}
+        if not has_ohlc:
+            volatility['note'] = 'ATR estimated from close-only data (no high/low)'
 
         if n < 14:
             volatility['available'] = False
@@ -390,19 +413,20 @@ class TechnicalAnalyzer:
         bull_pct = bull_signals / total_signals
         bear_pct = bear_signals / total_signals
 
-        if bull_pct >= 0.7:
+        # Thresholds from natural thirds of the signal distribution
+        if bull_pct >= 2/3:
             signal = 'STRONG_BULLISH'
-        elif bull_pct >= 0.5:
+        elif bull_pct > bear_pct:
             signal = 'MILDLY_BULLISH'
-        elif bear_pct >= 0.7:
+        elif bear_pct >= 2/3:
             signal = 'STRONG_BEARISH'
-        elif bear_pct >= 0.5:
+        elif bear_pct > bull_pct:
             signal = 'MILDLY_BEARISH'
         else:
             signal = 'NEUTRAL'
 
-        confidence = 'HIGH' if max(bull_pct, bear_pct) >= 0.75 else \
-                     ('MEDIUM' if max(bull_pct, bear_pct) >= 0.55 else 'LOW')
+        confidence = 'HIGH' if max(bull_pct, bear_pct) >= 2/3 else \
+                     ('MEDIUM' if max(bull_pct, bear_pct) > 0.5 else 'LOW')
 
         return {
             'signal': signal,

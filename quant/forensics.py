@@ -86,51 +86,75 @@ class BeneishMScore:
             ca_t1 = ta_t1 - self._z(fa_t1) - self._z(cwip_t1) - self._z(inv_t1)
 
             comp = {}
+            _defaulted = []  # Track components with missing data
 
-            # 1. DSRI ─────────────────────────────────────────
+            # 1. DSRI ─────────────────────────────────────────────
             if self._ok(rec_t, rec_t1, sales_t, sales_t1):
                 comp['DSRI'] = (rec_t / sales_t) / (rec_t1 / sales_t1)
             else:
-                comp['DSRI'] = 1.0
+                comp['DSRI'] = None  # Unavailable — excluded from M-Score
+                _defaulted.append('DSRI')
 
             # 2. GMI ──────────────────────────────────────────
             gm_t  = (sales_t - exp_t) / sales_t   if self._nz(sales_t)  else 0
             gm_t1 = (sales_t1 - exp_t1) / sales_t1 if self._nz(sales_t1) else 0
-            comp['GMI'] = gm_t1 / gm_t if self._nz(gm_t) else 1.0
+            comp['GMI'] = gm_t1 / gm_t if self._nz(gm_t) else None
+            if not self._nz(gm_t):
+                _defaulted.append('GMI')
 
             # 3. AQI ──────────────────────────────────────────
             aq_t  = 1 - (ca_t + self._z(fa_t)) / ta_t   if self._nz(ta_t)  else 0
             aq_t1 = 1 - (ca_t1 + self._z(fa_t1)) / ta_t1 if self._nz(ta_t1) else 0
-            comp['AQI'] = aq_t / aq_t1 if self._nz(aq_t1) else 1.0
+            comp['AQI'] = aq_t / aq_t1 if self._nz(aq_t1) else None
+            if not self._nz(aq_t1):
+                _defaulted.append('AQI')
 
             # 4. SGI ──────────────────────────────────────────
-            comp['SGI'] = sales_t / sales_t1 if self._nz(sales_t1) else 1.0
+            comp['SGI'] = sales_t / sales_t1 if self._nz(sales_t1) else None
+            if not self._nz(sales_t1):
+                _defaulted.append('SGI')
 
             # 5. DEPI ─────────────────────────────────────────
             dr_t  = dep_t / (self._z(fa_t) + dep_t)   if self._nz(self._z(fa_t) + dep_t) else 0
             dr_t1 = dep_t1 / (self._z(fa_t1) + dep_t1) if self._nz(self._z(fa_t1) + dep_t1) else 0
-            comp['DEPI'] = dr_t1 / dr_t if self._nz(dr_t) else 1.0
+            comp['DEPI'] = dr_t1 / dr_t if self._nz(dr_t) else None
+            if not self._nz(dr_t):
+                _defaulted.append('DEPI')
 
             # 6. SGAI ─────────────────────────────────────────
             sr_t  = exp_t / sales_t   if self._nz(sales_t)  else 0
             sr_t1 = exp_t1 / sales_t1 if self._nz(sales_t1) else 0
-            comp['SGAI'] = sr_t / sr_t1 if self._nz(sr_t1) else 1.0
+            comp['SGAI'] = sr_t / sr_t1 if self._nz(sr_t1) else None
+            if not self._nz(sr_t1):
+                _defaulted.append('SGAI')
 
             # 7. TATA ─────────────────────────────────────────
             if self._ok(cfo_t, np_t) and self._nz(ta_t):
                 comp['TATA'] = (np_t - cfo_t) / ta_t
             else:
-                comp['TATA'] = 0.0
+                comp['TATA'] = None  # Unavailable — excluded from M-Score
+                _defaulted.append('TATA')
 
             # 8. LVGI ─────────────────────────────────────────
             lev_t  = (self._z(ol_t) + self._z(borr_t)) / ta_t   if self._nz(ta_t)  else 0
             lev_t1 = (self._z(ol_t1) + self._z(borr_t1)) / ta_t1 if self._nz(ta_t1) else 0
-            comp['LVGI'] = lev_t / lev_t1 if self._nz(lev_t1) else 1.0
+            comp['LVGI'] = lev_t / lev_t1 if self._nz(lev_t1) else None
+            if not self._nz(lev_t1):
+                _defaulted.append('LVGI')
 
-            # ── Final M-Score ────────────────────────────────
+            # ── Final M-Score (only using available components) ────
+            available_components = {k: v for k, v in comp.items() if v is not None}
+            if len(available_components) < 4:
+                result['reason'] = (f'Only {len(available_components)}/8 M-Score components '
+                                    'could be computed — insufficient for reliable score')
+                result['components'] = {k: round(v, 4) if v is not None else None
+                                        for k, v in comp.items()}
+                result['components_defaulted'] = _defaulted
+                return result
+
             m = self.COEFF['intercept']
             for k, c in self.COEFF.items():
-                if k != 'intercept':
+                if k != 'intercept' and comp.get(k) is not None:
                     m += c * comp[k]
 
             # Interpretation
@@ -145,12 +169,27 @@ class BeneishMScore:
                 interp = "✅ UNLIKELY MANIPULATOR — Low probability of earnings manipulation"
                 risk   = "LOW"
 
+            # Confidence based on how many components used real data
+            if len(_defaulted) > 4:
+                confidence = 'LOW'
+            elif len(_defaulted) > 2:
+                confidence = 'MEDIUM'
+            else:
+                confidence = 'HIGH'
+
+            # If too many components are defaulted, flag interpretation
+            if len(_defaulted) > 4:
+                interp += f" (LOW confidence — {len(_defaulted)}/8 components used neutral assumptions)"
+
             result.update({
                 'available':      True,
                 'm_score':        round(m, 4),
                 'interpretation': interp,
                 'risk_level':     risk,
-                'components':     {k: round(v, 4) for k, v in comp.items()},
+                'components':     {k: round(v, 4) if v is not None else None
+                                   for k, v in comp.items()},
+                'components_defaulted': _defaulted,
+                'confidence':     confidence,
                 'thresholds': {
                     'manipulation_likely':   th.mscore_manipulation,
                     'manipulation_unlikely': th.mscore_safe,

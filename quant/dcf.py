@@ -41,6 +41,17 @@ class DCFModel:
 
         result = {'available': False, 'reason': ''}
 
+        # ── Verify required live market params are available ──
+        if self.m.risk_free_rate is None:
+            result['reason'] = 'Risk-free rate not available (live fetch failed)'
+            return result
+        if self.m.market_risk_premium is None:
+            result['reason'] = 'Market risk premium not available (live fetch failed)'
+            return result
+        if self.m.terminal_growth_rate is None:
+            result['reason'] = 'Terminal growth rate not available (live fetch failed)'
+            return result
+
         if cf.empty or pnl.empty or bs.empty:
             result['reason'] = 'Insufficient financial data for DCF'
             return result
@@ -58,14 +69,27 @@ class DCFModel:
             # ── 2. Growth-rate estimation ───────────────────
             fcf_growth     = self._estimate_growth(fcf)
             revenue_growth = self._estimate_growth(pp.get(pnl, 'sales').dropna())
-            # Use the more conservative estimate, cap at 20 %
-            growth_rate    = min(max(fcf_growth, 0.02), 0.20)
+
+            if fcf_growth is None and revenue_growth is None:
+                result['reason'] = 'Insufficient data to estimate growth rate'
+                return result
+
+            # Use the available estimate (prefer FCF, fallback to revenue)
+            base_growth = fcf_growth if fcf_growth is not None else revenue_growth
+            # No artificial clamping — real data stands as-is
+            growth_rate    = base_growth
             terminal_g     = self.m.terminal_growth_rate
 
             # ── 3. WACC ────────────────────────────────────
-            wacc = self._calculate_wacc(data)
+            wacc = self._calculate_wacc(data, terminal_g)
+            beta_estimated = getattr(self, '_beta_estimated', False)
+            if wacc is None:
+                result['reason'] = 'WACC could not be computed (missing beta or market data)'
+                return result
             if wacc <= terminal_g:
-                wacc = terminal_g + 0.02        # safety margin
+                result['reason'] = (f'WACC ({wacc:.2%}) ≤ terminal growth ({terminal_g:.2%}) — '
+                                    'DCF model invalid under current market conditions')
+                return result
 
             # ── 4. Latest / base FCF ───────────────────────
             latest_fcf = get_value(fcf)
@@ -85,21 +109,36 @@ class DCFModel:
             for yr in range(1, n + 1):
                 yr_growth = growth_rate - (growth_rate - terminal_g) * (yr / n)
                 fcf_proj  = latest_fcf * (1 + yr_growth) ** yr
+                # Guard against negative projected FCFs (e.g. from
+                # very negative growth rates). Floor at zero — we
+                # don't give credit for value-destroying cash flows.
+                if fcf_proj < 0:
+                    fcf_proj = 0.0
                 pv        = fcf_proj / (1 + wacc) ** yr
                 projected_fcf.append(fcf_proj)
                 pv_fcf.append(pv)
 
-            # ── 6. Terminal Value ──────────────────────────
+            # ── Step 1 result: PV of projected FCFs ──────
+            pv_of_fcf_total = sum(pv_fcf)
+
+            # ── Step 2: Terminal Value (Gordon Growth) ─────
             terminal_fcf = projected_fcf[-1] * (1 + terminal_g)
-            terminal_val = terminal_fcf / (wacc - terminal_g)
-            pv_terminal  = terminal_val / (1 + wacc) ** n
+            if terminal_fcf <= 0:
+                # If final projected FCF is zero/negative, terminal
+                # value cannot be meaningfully computed.
+                terminal_val = 0.0
+                pv_terminal  = 0.0
+            else:
+                terminal_val = terminal_fcf / (wacc - terminal_g)
+                pv_terminal  = terminal_val / (1 + wacc) ** n
 
-            # ── 7. Enterprise Value → Equity Value ─────────
-            enterprise_value = sum(pv_fcf) + pv_terminal
-            net_debt         = self._get_net_debt(bs)
-            equity_value     = enterprise_value - net_debt
+            # ── Step 3: Implied Enterprise Value ───────────
+            enterprise_value = pv_of_fcf_total + pv_terminal
 
-            # ── 8. Per-share intrinsic value ───────────────
+            # ── Step 4: Bridge to Equity Value & Target Price
+            net_debt     = self._get_net_debt(bs)
+            equity_value = enterprise_value - net_debt
+
             shares_cr = self._get_shares(data, pnl)
             if np.isnan(shares_cr) or shares_cr <= 0:
                 result['reason'] = 'Cannot determine shares outstanding'
@@ -109,16 +148,52 @@ class DCFModel:
             current_price   = self._get_current_price(price_df)
             upside = (
                 ((intrinsic_value - current_price) / current_price * 100)
-                if current_price > 0 else np.nan
+                if not np.isnan(current_price) and current_price > 0 else np.nan
             )
+
+            # ── Market Cap & Market EV for sanity check ───
+            market_cap = (
+                current_price * shares_cr
+                if not np.isnan(current_price) and shares_cr > 0
+                else np.nan
+            )
+            market_ev = (
+                market_cap + net_debt
+                if not np.isnan(market_cap)
+                else np.nan
+            )
+
+            # ── GUARDRAIL: DCF EV vs Market EV deviation ──
+            from config import config as _cfg
+            _ev_thresh = _cfg.validation.dcf_ev_threshold_pct
+            dcf_ev_mismatch = False
+            ev_delta_pct = None
+            if not np.isnan(market_ev) and market_ev > 0:
+                ev_delta_pct = abs(enterprise_value - market_ev) / market_ev * 100
+                if ev_delta_pct > _ev_thresh:
+                    dcf_ev_mismatch = True
+                    print(f"  ⚠ DCF GUARDRAIL: EV(DCF) ₹{enterprise_value:,.0f} Cr "
+                          f"vs Market EV ₹{market_ev:,.0f} Cr "
+                          f"(delta {ev_delta_pct:.0f}% > {_ev_thresh:.0f}% threshold) — "
+                          f"Target Price overridden to N/A")
 
             result.update({
                 'available':        True,
                 'intrinsic_value':  round(intrinsic_value, 2),
                 'current_price':    round(current_price, 2),
                 'upside_pct':       round(upside, 2) if not np.isnan(upside) else None,
+                # 4-step DCF breakdown
+                'pv_of_fcf':        round(pv_of_fcf_total, 2),
+                'pv_of_terminal':   round(pv_terminal, 2),
+                'terminal_value':   round(terminal_val, 2),
                 'enterprise_value': round(enterprise_value, 2),
                 'equity_value':     round(equity_value, 2),
+                'market_cap':       round(market_cap, 2) if not np.isnan(market_cap) else None,
+                'market_ev':        round(market_ev, 2) if not np.isnan(market_ev) else None,
+                # Guardrail
+                'dcf_ev_mismatch':  dcf_ev_mismatch,
+                'ev_delta_pct':     round(ev_delta_pct, 1) if ev_delta_pct is not None else None,
+                # Inputs
                 'wacc':             round(wacc * 100, 2),
                 'growth_rate':      round(growth_rate * 100, 2),
                 'terminal_growth':  round(terminal_g * 100, 2),
@@ -126,6 +201,10 @@ class DCFModel:
                 'latest_fcf':       round(latest_fcf, 2),
                 'projected_fcf':    [round(f, 2) for f in projected_fcf],
                 'shares_cr':        round(shares_cr, 2),
+                'beta_estimated':   getattr(self, '_beta_estimated', False),
+                'effective_tax_rate': round(self._effective_tax_rate * 100, 2) if self._effective_tax_rate is not None else None,
+                'risk_free_rate':   round(self.m.risk_free_rate * 100, 2),
+                'rf_source':        getattr(self.m, 'risk_free_rate_source', 'fallback'),
             })
 
             # ── 9. WACC Sensitivity Grid ───────────────────
@@ -156,36 +235,54 @@ class DCFModel:
         """CAGR of a positive-only series, clamped to [-10 %, 30 %]."""
         s = series.dropna()
         if len(s) < 2:
-            return 0.05
+            return None  # Insufficient data — no fallback
         pos = s[s > 0]
         if len(pos) < 2:
-            return 0.05
+            return None  # Insufficient data — no fallback
         n = len(pos) - 1
         cagr = (pos.iloc[-1] / pos.iloc[0]) ** (1 / n) - 1
-        return min(max(cagr, -0.10), 0.30)
+        return cagr  # No artificial clamping — real data stands
 
-    def _calculate_wacc(self, data: dict) -> float:
-        """Weighted Average Cost of Capital."""
+    def _calculate_wacc(self, data: dict, terminal_g: float = 0.04) -> float:
+        """Weighted Average Cost of Capital.
+        
+        Tax rate is computed from the REAL P&L (effective tax rate =
+        tax_expense / PBT) instead of using a hardcoded assumption.
+        """
         pnl = data.get('pnl', pd.DataFrame())
         bs  = data.get('balance_sheet', pd.DataFrame())
 
-        # Cost of equity (CAPM) — use real beta if available
+        # ── Effective tax rate from REAL P&L data ──────────
+        tax_rate = self._compute_effective_tax_rate(pnl)
+        if tax_rate is None:
+            return None  # Cannot compute WACC without tax rate
+        self._effective_tax_rate = tax_rate  # expose for reporting
+
+        # Cost of equity (CAPM) — ONLY live beta, no fallback
         beta_info = data.get('beta_info', {})
+        self._beta_estimated = False
         if beta_info.get('available') and beta_info.get('beta'):
             beta = beta_info['beta']
         else:
-            beta = self.m.default_beta
+            # No live beta available — cannot compute WACC
+            return None
         ke = self.m.risk_free_rate + beta * self.m.market_risk_premium
 
         # Cost of debt
         interest   = get_value(pp.get(pnl, 'interest'))
         borrowings = get_value(pp.get(bs, 'borrowings'))
-        kd = (
-            (interest / borrowings)
-            if (not np.isnan(interest) and not np.isnan(borrowings)
-                and borrowings > 0)
-            else 0.09
-        )
+        if (not np.isnan(interest) and not np.isnan(borrowings)
+                and borrowings > 0):
+            kd = interest / borrowings
+        elif not np.isnan(borrowings) and borrowings > 0:
+            # Have debt but no interest line — use live credit spread
+            if self.m.default_credit_spread is not None:
+                kd = self.m.risk_free_rate + self.m.default_credit_spread
+            else:
+                # Cannot determine cost of debt — skip debt component
+                kd = self.m.risk_free_rate  # conservative: Rf as floor for Kd
+        else:
+            kd = 0.0  # No debt — cost of debt is irrelevant
 
         # Weights
         eq_capital = get_value(pp.get(bs, 'equity_capital'))
@@ -193,18 +290,70 @@ class DCFModel:
         equity_val = self._s(eq_capital) + self._s(reserves)
         debt_val   = borrowings if not np.isnan(borrowings) else 0
         if equity_val <= 0:
-            equity_val = 1          # fallback
+            # Negative equity — use 100% equity cost (Ke) as WACC
+            wacc = ke * (1 - tax_rate)
+            return wacc  # No artificial floor — real computation stands
 
         total = equity_val + debt_val
         we = equity_val / total
         wd = debt_val / total
 
-        wacc = we * ke + wd * kd * (1 - self.m.tax_rate)
-        return max(wacc, 0.08)      # floor at 8 %
+        wacc = we * ke + wd * kd * (1 - tax_rate)
+        return wacc  # no artificial floor — real computation stands
+
+    def _compute_effective_tax_rate(self, pnl: pd.DataFrame) -> float:
+        """Compute effective tax rate from REAL P&L data.
+        
+        screener.in provides 'Tax%' directly as the effective rate.
+        Falls back to tax_expense / PBT if absolute values are available.
+        Uses config.tax_rate ONLY as last resort.
+        """
+        if pnl.empty:
+            return None  # No P&L data — cannot determine tax rate
+
+        # Method 1: Use screener.in's own Tax% (already effective rate)
+        tax_pct_series = pp.get(pnl, 'tax_pct')
+        if not tax_pct_series.empty:
+            # Tax% from screener is in decimal (0.25 = 25%) or percentage
+            rates = []
+            for i in range(min(3, len(tax_pct_series))):
+                val = get_value(tax_pct_series, i)
+                if not np.isnan(val):
+                    # screener.in reports as fraction (0.22, 0.24, etc.)
+                    rate = val if val < 1.0 else val / 100.0
+                    if 0.0 < rate < 0.60:  # sanity: 0% to 60%
+                        rates.append(rate)
+            if rates:
+                return round(sum(rates) / len(rates), 4)
+
+        # Method 2: Compute from absolute tax and PBT values
+        tax_series = pp.get(pnl, 'tax')
+        pbt_series = pp.get(pnl, 'pbt')
+        if not tax_series.empty and not pbt_series.empty:
+            rates = []
+            for i in range(min(3, len(tax_series))):
+                tax_val = get_value(tax_series, i)
+                pbt_val = get_value(pbt_series, i)
+                if (not np.isnan(tax_val) and not np.isnan(pbt_val)
+                        and pbt_val > 0 and tax_val >= 0):
+                    rate = tax_val / pbt_val
+                    if 0.0 < rate < 0.60:
+                        rates.append(rate)
+            if rates:
+                return round(sum(rates) / len(rates), 4)
+
+        return None  # No tax data available — do not fabricate
 
     def _get_net_debt(self, bs: pd.DataFrame) -> float:
-        borr = get_value(pp.get(bs, 'borrowings'))
-        return self._s(borr)
+        """Net Debt = Total Borrowings - Cash & Equivalents.
+
+        Proper DCF formula: Equity Value = EV(DCF) - Net Debt
+        where Net Debt = Debt - Cash.  Subtracting only gross debt
+        without adding back cash overstates the deduction.
+        """
+        borr = self._s(get_value(pp.get(bs, 'borrowings')))
+        cash = self._s(get_value(pp.get(bs, 'cash_equivalents')))
+        return borr - cash
 
     def _get_shares(self, data: dict, pnl: pd.DataFrame) -> float:
         """Shares outstanding (in Cr)."""
@@ -225,7 +374,7 @@ class DCFModel:
             if 'close' in price_df.columns:
                 return float(price_df['close'].iloc[-1])
             return float(price_df.iloc[-1, 0])
-        return 0.0
+        return np.nan  # No price data — do not fabricate
 
     @staticmethod
     def _s(v):
@@ -264,7 +413,7 @@ class DCFModel:
                 pv_tv = tv / (1 + wacc) ** n
                 ev = pv_sum + pv_tv
                 eq = ev - net_debt
-                iv = round(eq / shares_cr, 2) if shares_cr > 0 else 0
+                iv = round(eq / shares_cr, 2) if shares_cr > 0 else None
                 row.append(iv)
             grid.append(row)
         return {
@@ -320,9 +469,23 @@ class DCFModel:
             except (IndexError, ZeroDivisionError):
                 history.append(None)
 
-        flag = conversion_pct < 70
+        # Determine red flag threshold from historical data:
+        # If we have 3+ years of history, use mean - 1σ as the threshold.
+        # This flags only companies whose conversion ratio is unusually low
+        # relative to their OWN historical pattern.
+        valid_history = [h for h in history if h is not None]
+        if len(valid_history) >= 3:
+            import numpy as np
+            hist_mean = np.mean(valid_history)
+            hist_std = np.std(valid_history)
+            dynamic_threshold = hist_mean - hist_std
+        else:
+            # With limited history, flag if below 50% (well below break-even conversion)
+            dynamic_threshold = 50.0
+
+        flag = conversion_pct < dynamic_threshold
         assessment = (
-            f"🔴 Poor cash conversion ({conversion_pct}% < 70%) — "
+            f"🔴 Poor cash conversion ({conversion_pct}% < {dynamic_threshold:.0f}% threshold) — "
             "profits may not be backed by real cash" if flag
             else f"🟢 Healthy cash conversion ({conversion_pct}%)"
         )

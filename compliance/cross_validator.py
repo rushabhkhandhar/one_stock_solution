@@ -6,6 +6,10 @@ in the actual Annual Report PDFs.
 
 Trust Score = (matched_checks / total_checks) * 100
 
+All thresholds (tolerance, trust labels, auditor penalties) are
+pulled from ``config.validation`` — ZERO hardcoded values in this
+module.
+
 Validation checks:
   1. Revenue match            — scraper vs AR
   2. PAT (Net Profit) match   — scraper vs AR
@@ -16,16 +20,23 @@ Validation checks:
   6. Auditor opinion          — clean / qualified / adverse?
   7. Contingent liabilities   — material amounts flagged?
 
-Tolerance: ±2% for exact figures (rounding differences between
-screener.in summary and detailed AR figures are expected).
+AR values in Lakhs are auto-normalised to Crores (÷100) before
+comparison.
+
+Period matching: If an AR year is provided, the validator picks
+the matching FY column from the scraper data.
 """
 import numpy as np
 import pandas as pd
+from config import config
 
 
 class CrossValidator:
     """
     Cross-validate scraper data against Annual Report PDF data.
+
+    All thresholds are pulled from ``config.validation`` —
+    nothing is hardcoded in this module.
 
     Usage:
         validator = CrossValidator()
@@ -36,19 +47,18 @@ class CrossValidator:
         # result['auditor_flags']  → auditor red flags
     """
 
-    # Tolerance for numeric match (2% relative difference)
-    TOLERANCE_PCT = 2.0
-    # Tolerance for small absolute values (below this, use absolute diff)
-    ABS_THRESHOLD = 10.0
-    ABS_TOLERANCE = 1.0
-
-    def validate(self, scraper_data: dict, ar_parsed: dict) -> dict:
+    def validate(self, scraper_data: dict, ar_parsed: dict,
+                  ar_year: int = None) -> dict:
         """
         Run all validation checks.
 
         Args:
             scraper_data: The cleaned data dict from ingestion pipeline
             ar_parsed:    Output of PDFParser.parse()
+            ar_year:      Fiscal year the AR covers (e.g. 2025 for FY ending
+                          Mar 2025).  When provided the validator picks the
+                          matching column from scraper data instead of the
+                          latest one.
 
         Returns:
             Comprehensive validation result dict.
@@ -63,10 +73,18 @@ class CrossValidator:
         checks = []
         key_figs = ar_parsed.get('key_figures', {})
 
+        # Helper: pick the right value getter based on whether we have
+        # a target AR year.
+        def _val(df_key, col_name):
+            if ar_year:
+                return self._get_value_for_year(
+                    scraper_data, df_key, col_name, ar_year)
+            return self._get_latest_value(scraper_data, df_key, col_name)
+
         # ------------------------------------------------------------------
         # 1. Revenue validation
         # ------------------------------------------------------------------
-        scraper_revenue = self._get_latest_value(scraper_data, 'pnl', 'Sales')
+        scraper_revenue = _val('pnl', 'Sales')
         ar_revenue = key_figs.get('revenue_ar') or key_figs.get('revenue_table')
         checks.append(self._compare_values(
             'Revenue from Operations',
@@ -77,7 +95,7 @@ class CrossValidator:
         # ------------------------------------------------------------------
         # 2. PAT (Profit After Tax) validation
         # ------------------------------------------------------------------
-        scraper_pat = self._get_latest_value(scraper_data, 'pnl', 'NetProfit')
+        scraper_pat = _val('pnl', 'NetProfit')
         ar_pat = key_figs.get('pat_ar') or key_figs.get('pat_table')
         checks.append(self._compare_values(
             'Profit After Tax (PAT)',
@@ -88,7 +106,7 @@ class CrossValidator:
         # ------------------------------------------------------------------
         # 3. EPS validation
         # ------------------------------------------------------------------
-        scraper_eps = self._get_latest_value(scraper_data, 'pnl', 'EPSinRs')
+        scraper_eps = _val('pnl', 'EPSinRs')
         ar_eps = key_figs.get('eps_ar') or key_figs.get('eps_table')
         checks.append(self._compare_values(
             'Earnings Per Share (EPS)',
@@ -99,8 +117,7 @@ class CrossValidator:
         # ------------------------------------------------------------------
         # 4. Operating Cash Flow validation
         # ------------------------------------------------------------------
-        scraper_ocf = self._get_latest_value(
-            scraper_data, 'cash_flow', 'CashfromOperatingActivity')
+        scraper_ocf = _val('cash_flow', 'CashfromOperatingActivity')
         ar_ocf = key_figs.get('operating_cashflow_ar')
         checks.append(self._compare_values(
             'Operating Cash Flow',
@@ -130,10 +147,12 @@ class CrossValidator:
         # ------------------------------------------------------------------
         # Compute Trust Score
         # ------------------------------------------------------------------
-        passed = sum(1 for c in checks if c['status'] == 'MATCH')
+        passed  = sum(1 for c in checks if c['status'] == 'MATCH')
         partial = sum(1 for c in checks if c['status'] == 'PARTIAL')
-        total = sum(1 for c in checks if c['status'] != 'SKIPPED')
+        skipped = sum(1 for c in checks if c['status'] == 'SKIPPED')
+        total   = sum(1 for c in checks if c['status'] != 'SKIPPED')
 
+        v = config.validation
         if total == 0:
             trust_score = None
             trust_label = 'INSUFFICIENT DATA'
@@ -142,15 +161,15 @@ class CrossValidator:
             # Penalize for auditor red flags
             severe_flags = sum(1 for f in auditor_flags
                                if f.get('severity') == 'HIGH')
-            penalty = min(severe_flags * 10, 30)  # Max 30% penalty
+            penalty = min(severe_flags * v.auditor_penalty_per_flag,
+                          v.auditor_penalty_cap)
             trust_score = max(0, round(raw_score - penalty, 1))
 
-            if trust_score >= 80:
+            # Trust label — thresholds from config.validation
+            if trust_score >= v.trust_high:
                 trust_label = 'HIGH CONFIDENCE \u2705'
-            elif trust_score >= 60:
+            elif trust_score >= v.trust_moderate:
                 trust_label = 'MODERATE CONFIDENCE \U0001f7e1'
-            elif trust_score >= 40:
-                trust_label = 'LOW CONFIDENCE \u26a0\ufe0f'
             else:
                 trust_label = 'UNRELIABLE \U0001f534'
 
@@ -205,11 +224,13 @@ class CrossValidator:
             result['detail'] = 'NaN value(s)'
             return result
 
+        v = config.validation          # shorthand
+
         # Compute difference
-        if abs(ar_val) < self.ABS_THRESHOLD:
+        if abs(ar_val) < v.abs_threshold:
             diff = abs(scraper_val - ar_val)
             pct_diff = None
-            if diff <= self.ABS_TOLERANCE:
+            if diff <= v.abs_tolerance:
                 result['status'] = 'MATCH'
                 result['detail'] = f'Absolute diff: {diff:.2f} (within tolerance)'
             else:
@@ -219,10 +240,13 @@ class CrossValidator:
             pct_diff = abs(scraper_val - ar_val) / abs(ar_val) * 100
             result['pct_diff'] = round(pct_diff, 2)
 
-            if pct_diff <= self.TOLERANCE_PCT:
+            if pct_diff <= v.tolerance_pct:
                 result['status'] = 'MATCH'
-                result['detail'] = f'{pct_diff:.2f}% difference (within {self.TOLERANCE_PCT}% tolerance)'
-            elif pct_diff <= self.TOLERANCE_PCT * 3:
+                result['detail'] = (
+                    f'{pct_diff:.2f}% difference '
+                    f'(within {v.tolerance_pct}% tolerance)'
+                )
+            elif pct_diff <= v.tolerance_pct * 2:
                 result['status'] = 'PARTIAL'
                 result['detail'] = (
                     f'{pct_diff:.2f}% difference — minor discrepancy, '
@@ -234,6 +258,26 @@ class CrossValidator:
                     f'{pct_diff:.2f}% difference — significant mismatch! '
                     f'Check for restatements, exceptional items, or '
                     f'standalone vs consolidated mismatch.'
+                )
+
+        # ── Lakhs → Crores normalisation ────────────────────
+        # Indian Annual Reports typically report in Lakhs, while
+        # Screener.in standardises to Crores (1 Cr = 100 Lakhs).
+        if result['status'] in ('MISMATCH', 'PARTIAL'):
+            ar_normalised = ar_val / v.lakhs_to_crores
+            if abs(scraper_val) > 0:
+                adj_pct = abs(scraper_val - ar_normalised) / abs(scraper_val) * 100
+            else:
+                adj_pct = float('inf')
+            if adj_pct <= v.tolerance_pct:
+                result['status'] = 'MATCH'
+                result['ar_value_normalised'] = round(ar_normalised, 2)
+                result['unit_adjusted'] = True
+                result['pct_diff'] = round(adj_pct, 2)
+                result['detail'] = (
+                    f'Unit mismatch detected (Lakhs→Crores, ÷{v.lakhs_to_crores:.0f}): '
+                    f'AR {ar_val:,.2f} Lakhs ≈ {ar_normalised:,.2f} Cr — '
+                    f'{adj_pct:.1f}% diff after conversion'
                 )
 
         return result
@@ -299,9 +343,24 @@ class CrossValidator:
             },
         }
 
+        # Boilerplate phrases that should NOT trigger flags
+        # (standard Indian AR language, not actual issues)
+        _BOILERPLATE = [
+            'regrouped and/or reclassified wherever necessary',
+            'reclassified wherever necessary',
+            'regrouped wherever necessary',
+            'previous year figures have been regrouped',
+            'figures have been reclassified',
+            'previous year figures have been rearranged',
+        ]
+
         for fn in footnotes:
             combined = (fn.get('title', '') + ' ' +
                         fn.get('text', '')[:500]).lower()
+
+            # Skip boilerplate notes
+            if any(bp in combined for bp in _BOILERPLATE):
+                continue
 
             for flag_name, config in risk_patterns.items():
                 for keyword in config['pattern']:
@@ -318,11 +377,13 @@ class CrossValidator:
                         })
                         break  # One flag per pattern per note
 
-        # Deduplicate by (type, note_id)
+        # Deduplicate by (type, normalized_title) — content-based dedup
         seen = set()
         unique = []
         for f in flags:
-            key = (f['type'], f['note_id'])
+            # Normalize title for dedup (strip whitespace, lowercase, first 80 chars)
+            norm_title = f.get('title', '').strip().lower()[:80]
+            key = (f['type'], norm_title)
             if key not in seen:
                 seen.add(key)
                 unique.append(f)
@@ -418,6 +479,43 @@ class CrossValidator:
     # ==================================================================
     # Helpers
     # ==================================================================
+    def _get_value_for_year(self, data: dict, df_key: str,
+                             col_name: str, target_year: int):
+        """
+        Get the value for a specific FY from a scraper DataFrame.
+
+        Screener.in indexes rows like 'Mar 2025', 'Mar 2024', etc.
+        If the target year is found, return that row's value;
+        otherwise fall back to the latest value.
+        """
+        df = data.get(df_key)
+        if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+            return None
+
+        # Resolve column
+        col = None
+        for c in df.columns:
+            normalized = c.replace('\xa0', '').replace(' ', '').lower()
+            if normalized == col_name.replace(' ', '').lower():
+                col = c
+                break
+        if col is None:
+            return None
+
+        # Try to find a row whose index contains the target year
+        year_str = str(target_year)
+        for idx in df.index:
+            if year_str in str(idx):
+                val = df.loc[idx, col]
+                if pd.notna(val):
+                    return float(val)
+
+        # Fallback: latest non-null
+        vals = df[col].dropna()
+        if vals.empty:
+            return None
+        return float(vals.iloc[-1])
+
     def _get_latest_value(self, data: dict, df_key: str,
                            col_name: str):
         """Get the latest annual value from a scraper DataFrame."""

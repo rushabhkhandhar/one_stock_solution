@@ -54,6 +54,46 @@ class DataIngestion:
         )
 
     # ------------------------------------------------------------------
+    # TTM EPS computation
+    # ------------------------------------------------------------------
+    def _compute_ttm_eps(self, quarterly_raw: dict) -> float:
+        """
+        Compute Trailing Twelve Months EPS from quarterly data.
+
+        1. If the scraper provides a 'TTM' row, use its EPS directly.
+        2. Otherwise, sum the EPS of the last 4 quarters.
+        """
+        import numpy as np
+
+        # Method 1: TTM row from scraper
+        if 'TTM' in quarterly_raw:
+            for entry in quarterly_raw['TTM']:
+                if isinstance(entry, dict):
+                    eps_val = entry.get('EPSinRs')
+                    if eps_val is not None and not isinstance(eps_val, str):
+                        return float(eps_val)
+
+        # Method 2: Sum last 4 quarters' EPS
+        keys = [k for k in quarterly_raw.keys() if k != 'TTM']
+        keys.sort()
+        if len(keys) >= 4:
+            last_4 = keys[-4:]
+            total_eps = 0.0
+            count = 0
+            for k in last_4:
+                for entry in quarterly_raw[k]:
+                    if isinstance(entry, dict) and 'EPSinRs' in entry:
+                        val = entry['EPSinRs']
+                        if val is not None and not isinstance(val, str):
+                            total_eps += float(val)
+                            count += 1
+                            break
+            if count == 4:
+                return round(total_eps, 2)
+
+        return None  # Cannot compute TTM EPS
+
+    # ------------------------------------------------------------------
     # Dict → DataFrame conversion
     # ------------------------------------------------------------------
     def _dict_to_dataframe(self, raw: dict) -> pd.DataFrame:
@@ -64,7 +104,7 @@ class DataIngestion:
         records = {}
         for date_key, entries in raw.items():
             if date_key == "TTM":
-                continue  # Skip trailing-twelve-months for now
+                continue  # TTM captured separately via _extract_ttm
             row = {}
             for entry in entries:
                 for k, v in entry.items():
@@ -193,6 +233,7 @@ class DataIngestion:
                 with open(cache_file, 'r', encoding='utf-8') as f:
                     text = f.read()
                 if text and len(text) > 200:
+                    text = self._clean_transcript(text)
                     transcripts.append(text)
                     print(f"      ✔ Transcript {date_key}: "
                           f"{len(text):,} chars (cached)")
@@ -256,6 +297,7 @@ class DataIngestion:
                 if text and len(text) > 200:
                     # Clean up excessive whitespace
                     text = re.sub(r'\n{3,}', '\n\n', text)
+                    text = self._clean_transcript(text)
                     transcripts.append(text)
                     # Cache to disk
                     with open(cache_file, 'w', encoding='utf-8') as f:
@@ -270,6 +312,15 @@ class DataIngestion:
                 print(f"      ⚠ Transcript {date_key} error: {e}")
 
         return transcripts
+
+    @staticmethod
+    def _clean_transcript(text: str) -> str:
+        """Delegate to RAGEngine's transcript cleaner."""
+        try:
+            from qualitative.rag_engine import RAGEngine
+            return RAGEngine.clean_transcript_noise(text)
+        except Exception:
+            return text
 
     # ------------------------------------------------------------------
     # Master loader
@@ -291,8 +342,8 @@ class DataIngestion:
         self.scraper.loadScraper(token, consolidated=consolidated)
 
         print("  [1/11] Quarterly results …")
-        quarterly_raw = self.scraper.quarterlyReport(withAddon=True)
-
+        quarterly_raw = self.scraper.quarterlyReport(withAddon=True)        # Extract TTM EPS from quarterly data
+        ttm_eps = self._compute_ttm_eps(quarterly_raw)
         print("  [2/11] Profit & Loss …")
         pnl_raw = self.scraper.pnlReport(withAddon=True)
 
@@ -360,6 +411,7 @@ class DataIngestion:
             'announcements':   announcements,
             'macro':           macro,
             'beta_info':       beta_info,
+            'ttm_eps':         ttm_eps,
         }
 
         print(f"\n  ✔ Data loaded successfully for {symbol}.")

@@ -27,6 +27,56 @@ from compliance.safety import DISCLAIMER, stamp_source
 class ReportGenerator:
 
     # ==================================================================
+    @staticmethod
+    def _smart_truncate(text: str, max_chars: int = 350) -> str:
+        """Return only *complete* sentences that fit within *max_chars*.
+
+        If no full sentence fits, take the first sentence (even if it
+        exceeds the budget slightly) and append an ellipsis.
+        This guarantees every snippet reads as a coherent thought.
+        """
+        import re as _re
+        # Clean transcript noise before truncating
+        try:
+            from qualitative.rag_engine import RAGEngine
+            text = RAGEngine.clean_transcript_noise(text)
+        except Exception:
+            pass
+        text = text.strip()
+        if len(text) <= max_chars:
+            return text
+
+        # Split into sentences (keep the delimiter attached)
+        sentences = _re.split(r'(?<=[.!?])\s+', text)
+
+        # Greedily collect whole sentences that fit
+        result = ''
+        for sent in sentences:
+            candidate = (result + ' ' + sent).strip() if result else sent
+            if len(candidate) <= max_chars:
+                result = candidate
+            else:
+                break
+
+        if result:
+            return result
+
+        # No complete sentence fits — take the first sentence, trim
+        # at the nearest clause boundary inside the budget.
+        first = sentences[0] if sentences else text
+        if len(first) <= max_chars:
+            return first
+        window = first[:max_chars]
+        for delim in ['. ', '; ', ', ']:
+            idx = window.rfind(delim)
+            if idx > max_chars * 0.35:
+                return window[:idx + 1].strip()
+        idx = window.rfind(' ')
+        if idx > 0:
+            return window[:idx].rstrip('.,;:!?') + ' \u2026'
+        return window
+
+    # ==================================================================
     def generate(self, symbol: str, data: dict, analysis: dict) -> str:
         now = datetime.datetime.now().strftime("%d %B %Y, %I:%M %p")
 
@@ -54,23 +104,36 @@ class ReportGenerator:
         a("")
 
         # ── Rating Box ───────────────────────────────────────
+        is_suspended = rating.get('data_suspended', False)
         if rating:
             a(f"## 🏷️ Rating: {rating.get('recommendation', 'N/A')}\n")
-            if dcf.get('available'):
+            if is_suspended:
+                a("> ⚠️ **RATING SUSPENDED** — Data Trust Score is below "
+                  "the reliability threshold. All quantitative outputs "
+                  "(DCF, ratios, forensics) may be inaccurate. "
+                  "Manual review required before acting on this report.\n")
+            if dcf.get('available') and not is_suspended:
+                dcf_mismatch = dcf.get('dcf_ev_mismatch', False)
                 a(f"| | |")
                 a(f"|---|---|")
-                a(f"| **Target Price (DCF)** | ₹{dcf['intrinsic_value']:,.2f} |")
+                if dcf_mismatch:
+                    a(f"| **Target Price (DCF)** | ⚠️ N/A (see guardrail below) |")
+                else:
+                    a(f"| **Target Price (DCF)** | ₹{dcf['intrinsic_value']:,.2f} |")
                 a(f"| **Current Price** | ₹{dcf['current_price']:,.2f} |")
-                up = dcf.get('upside_pct')
-                if up is not None:
-                    a(f"| **Upside / Downside** | {up:+.1f} % |")
-                a(f"| **Investment Horizon** | {rating.get('horizon', '12–18 months')} |")
+                if not dcf_mismatch:
+                    up = dcf.get('upside_pct')
+                    if up is not None:
+                        a(f"| **Upside / Downside** | {up:+.1f} % |")
+                a(f"| **Investment Horizon** | {rating.get('horizon', 'N/A')} |")
             a("")
 
         # ── Investment Thesis ────────────────────────────────
         a("## 📌 Investment Thesis\n")
         for pt in rating.get('thesis', []):
-            a(f"- {pt}")
+            # Strip any stray $ / LaTeX artefacts from thesis bullets
+            _pt = pt.replace('$', '')
+            a(f"- {_pt}")
         a("")
 
         # ── Financial Summary Table ──────────────────────────
@@ -79,8 +142,9 @@ class ReportGenerator:
         a("|--------|------:|")
         METRICS = [
             ('Current Price',         'current_price',   '₹{:,.2f}'),
-            ('P/E Ratio',             'pe_ratio',        '{:.2f}x'),
-            ('EPS',                   'eps',             '₹{:.2f}'),
+            ('P/E Ratio (TTM)',       'pe_ratio',        '{:.2f}x'),
+            ('EPS (Annual)',          'eps',             '₹{:.2f}'),
+            ('EPS (TTM)',             'ttm_eps',         '₹{:.2f}'),
             ('ROE',                   'roe',             '{:.2f} %'),
             ('ROA',                   'roa',             '{:.2f} %'),
             ('ROCE',                  'roce',            '{:.2f} %'),
@@ -116,27 +180,41 @@ class ReportGenerator:
         # ── 5-Year Trend Analysis (NEW) ─────────────────────
         if trends.get('available'):
             a("## 📈 5-Year Trend Analysis\n")
-            direction = trends.get('overall_direction', 'STABLE')
-            health = trends.get('health_score', 0)
+            direction = trends.get('overall_direction', 'N/A')
+            health = trends.get('health_score')
             dir_icon = {'IMPROVING': '🟢', 'STABLE': '🟡',
                         'DETERIORATING': '🔴'}.get(direction, '⚪')
             a(f"**{dir_icon} Overall Direction: {direction}** "
-              f"| Health Score: {health}/10\n")
+              f"| Health Score: {health if health is not None else 'N/A'}/10\n")
 
             metrics = trends.get('metrics', [])
             if metrics:
                 a("| Metric | Latest | Direction | 5Y CAGR | Acceleration |")
                 a("|--------|-------:|:---------:|--------:|:------------:|")
                 for m in metrics:
-                    arrow = {'UP': '↑ 🟢', 'DOWN': '↓ 🔴',
-                             'FLAT': '→ 🟡'}.get(m.get('direction', ''), '→')
+                    arrow = {'UP': 'UP', 'DOWN': 'DOWN',
+                             'FLAT': 'FLAT'}.get(m.get('direction', ''), 'FLAT')
                     cagr = f"{m['cagr_5y']:+.1f}%" if m.get('cagr_5y') is not None else 'N/A'
                     accel = m.get('acceleration', '—')
                     val = m.get('latest', 0)
-                    if m.get('is_ratio'):
-                        display = f"{val:.2f}%"  if abs(val) < 10 else f"{val:.1f}%"
+                    if m.get('is_pure_ratio'):
+                        # D/E etc. — show as multiple, not %
+                        display = f"{val:.2f}x"
+                    elif m.get('is_pct_decimal'):
+                        # Derived decimal ratios (ROE, PAT Margin) — ×100
+                        display = f"{val * 100:.2f} %"
+                    elif m.get('is_ratio'):
+                        # Already-percentage ratios (ROCE%, OPM%)
+                        display = f"{val:.2f} %" if abs(val) < 100 else f"{val:.1f} %"
                     else:
-                        display = f"₹{val:,.0f} Cr" if val > 1 else f"{val:.2f}"
+                        # Absolute values — but EPS is per-share, not Cr
+                        lbl = m.get('label', '')
+                        if 'EPS' in lbl:
+                            display = f"₹{val:.2f}"
+                        elif abs(val) > 1:
+                            display = f"₹{val:,.0f} Cr"
+                        else:
+                            display = f"{val:.2f}"
                     a(f"| {m['label']} | {display} | {arrow} | {cagr} | {accel} |")
                 a("")
 
@@ -152,42 +230,128 @@ class ReportGenerator:
                             years = [h['year'] for h in hist]
                             vals = [f"{h['value']:,.0f}" for h in hist]
                             a(f"**{m['label']}:** "
-                              + " → ".join(f"{y}: ₹{v}" for y, v in
-                                           zip(years, vals)))
+                              + " | ".join(f"{y}: Rs.{v}"
+                                           for y, v in zip(years, vals)))
                     a("")
 
                 # Projections
                 a("### Linear Projections\n")
                 a("| Metric | Proj. Y+1 | Proj. Y+2 |")
                 a("|--------|----------:|----------:|")
-                for m in metrics[:6]:
+
+                # Build revenue/op-profit projections for OPM re-calc
+                _rev_p = {}
+                _op_p = {}
+                for m in metrics[:8]:
+                    if m['label'] == 'Revenue':
+                        _rev_p = {'p1': m.get('projection_1y'), 'p2': m.get('projection_2y')}
+                    if m['label'] == 'Operating Profit':
+                        _op_p = {'p1': m.get('projection_1y'), 'p2': m.get('projection_2y')}
+
+                for m in metrics[:8]:
                     p1 = m.get('projection_1y')
                     p2 = m.get('projection_2y')
-                    if p1 is not None:
-                        a(f"| {m['label']} | ₹{p1:,.0f} | ₹{p2:,.0f} |")
+                    if p1 is None:
+                        continue
+                    lbl = m['label']
+
+                    if lbl == 'OPM %' and _rev_p.get('p1') and _op_p.get('p1'):
+                        # Recompute OPM dynamically from projected values
+                        opm1 = (_op_p['p1'] / _rev_p['p1']) * 100 if _rev_p['p1'] else 0
+                        opm2 = (_op_p['p2'] / _rev_p['p2']) * 100 if _rev_p['p2'] else 0
+                        a(f"| {lbl} | {opm1:.1f} % | {opm2:.1f} % |")
+                    elif m.get('is_pure_ratio'):
+                        a(f"| {lbl} | {p1:.2f}x | {p2:.2f}x |")
+                    elif m.get('is_pct_decimal'):
+                        a(f"| {lbl} | {p1 * 100:.1f} % | {p2 * 100:.1f} % |")
+                    elif m.get('is_ratio'):
+                        a(f"| {lbl} | {p1:.1f} % | {p2:.1f} % |")
+                    else:
+                        # Absolute values — EPS is per-share, not Crores
+                        if 'EPS' in lbl:
+                            a(f"| {lbl} | ₹{p1:.2f} | ₹{p2:.2f} |")
+                        else:
+                            a(f"| {lbl} | ₹{p1:,.0f} | ₹{p2:,.0f} |")
                 a("")
                 a("> ⚠️ *Linear projections — actual results depend on "
                   "market conditions, management execution, and macro factors.*\n")
 
         # ── DCF Valuation ────────────────────────────────────
         a("## 💰 Valuation Analysis — DCF Model\n")
-        if dcf.get('available'):
+        if is_suspended:
+            a("> ⚠️ **DCF BYPASSED** — Data Trust Score is below reliability "
+              "threshold. DCF model generation is bypassed to prevent "
+              "misleading valuation outputs.\n")
+        elif dcf.get('available'):
+            dcf_mismatch = dcf.get('dcf_ev_mismatch', False)
+
+            # ── DCF Inputs ──
+            a("### Model Inputs\n")
             a("| Parameter | Value |")
             a("|-----------|------:|")
             a(f"| WACC | {dcf['wacc']} % |")
             a(f"| Growth Rate (initial) | {dcf['growth_rate']} % |")
             a(f"| Terminal Growth | {dcf['terminal_growth']} % |")
             a(f"| Latest FCF | ₹{dcf['latest_fcf']:,.2f} Cr |")
-            a(f"| Enterprise Value | ₹{dcf['enterprise_value']:,.2f} Cr |")
-            a(f"| Net Debt | ₹{dcf['net_debt']:,.2f} Cr |")
-            a(f"| Equity Value | ₹{dcf['equity_value']:,.2f} Cr |")
-            a(f"| Shares Outstanding | {dcf['shares_cr']:.2f} Cr |")
-            a(f"| **Intrinsic Value / Share** | **₹{dcf['intrinsic_value']:,.2f}** |")
-            a(f"| Current Market Price | ₹{dcf['current_price']:,.2f} |")
-            up = dcf.get('upside_pct')
-            if up is not None:
-                icon = "🟢" if up > 10 else ("🟡" if up > -10 else "🔴")
-                a(f"| Upside / Downside | {icon} {up:+.1f} % |")
+            a(f"| Projection Period | {len(dcf.get('projected_fcf', []))} years |")
+            a("")
+
+            # ── 4-Step DCF Breakdown ──
+            a("### 4-Step DCF Breakdown\n")
+            a("| Step | Description | Value |")
+            a("|:----:|-------------|------:|")
+            _pv_fcf = dcf.get('pv_of_fcf')
+            a(f"| 1 | PV of Projected FCFs | "
+              f"{f'₹{_pv_fcf:,.2f} Cr' if _pv_fcf is not None else 'N/A'} |")
+            _pv_tv = dcf.get('pv_of_terminal')
+            _tv = dcf.get('terminal_value')
+            a(f"| 2 | Terminal Value (Gordon) | "
+              f"{f'₹{_tv:,.2f} Cr' if _tv is not None else 'N/A'} |")
+            a(f"| 2b | PV of Terminal Value | "
+              f"{f'₹{_pv_tv:,.2f} Cr' if _pv_tv is not None else 'N/A'} |")
+            a(f"| 3 | **Enterprise Value (DCF)** | "
+              f"**₹{dcf['enterprise_value']:,.2f} Cr** |")
+            a(f"| 4a | − Net Debt | ₹{dcf['net_debt']:,.2f} Cr |")
+            a(f"| 4b | = Equity Value | ₹{dcf['equity_value']:,.2f} Cr |")
+            a(f"| 4c | ÷ Shares Outstanding | {dcf['shares_cr']:.2f} Cr |")
+            if dcf_mismatch:
+                a(f"| 4d | **Target Price / Share** | **⚠️ N/A** |")
+            else:
+                a(f"| 4d | **Target Price / Share** | "
+                  f"**₹{dcf['intrinsic_value']:,.2f}** |")
+            a("")
+
+            # ── Market Comparison ──
+            a("### Market Comparison\n")
+            a("| Metric | Value |")
+            a("|--------|------:|")
+            a(f"| Current Market Price | Rs. {dcf['current_price']:,.2f} |")
+            if dcf.get('market_cap') is not None:
+                a(f"| Market Cap | Rs. {dcf['market_cap']:,.2f} Cr |")
+            if dcf.get('market_ev') is not None:
+                a(f"| Market Enterprise Value | Rs. {dcf['market_ev']:,.2f} Cr |")
+            a(f"| DCF Enterprise Value | Rs. {dcf['enterprise_value']:,.2f} Cr |")
+            _delta = dcf.get('ev_delta_pct')
+            if _delta is not None:
+                a(f"| EV Delta (DCF vs Market) | {_delta:.1f}% |")
+            if not dcf_mismatch:
+                up = dcf.get('upside_pct')
+                if up is not None:
+                    icon = "🟢" if up > 10 else ("🟡" if up > -10 else "🔴")
+                    a(f"| Upside / Downside | {icon} {up:+.1f} % |")
+            a("")
+
+            # ── EV Mismatch Guardrail Warning ──
+            if dcf_mismatch:
+                from config import config as _cfg2
+                a("> 🔴 **DCF GUARDRAIL TRIGGERED** — The DCF Enterprise Value "
+                  f"(Rs. {dcf['enterprise_value']:,.0f} Cr) deviates from the "
+                  f"Market Enterprise Value "
+                  f"(Rs. {dcf.get('market_ev', 0):,.0f} Cr) by "
+                  f"{_delta:.0f}%, which exceeds the "
+                  f"{_cfg2.validation.dcf_ev_threshold_pct:.0f}% sanity threshold. "
+                  "Target Price has been overridden to **N/A**. "
+                  "Manual review of WACC and Growth Rate inputs is required.\n")
             a("")
             # Projected FCFs
             proj = dcf.get('projected_fcf', [])
@@ -201,7 +365,7 @@ class ReportGenerator:
 
             # WACC Sensitivity Grid
             sens = dcf.get('sensitivity', {})
-            if sens.get('available'):
+            if sens.get('available') and not dcf_mismatch:
                 a("### WACC Sensitivity Grid\n")
                 a("> Intrinsic value per share (₹) under different WACC and "
                   "Terminal Growth Rate assumptions.\n")
@@ -214,13 +378,65 @@ class ReportGenerator:
                 sep = "|---:|" + "|".join("---:" for _ in tgr_range) + "|"
                 a(hdr); a(sep)
                 for i, w in enumerate(wacc_range):
-                    row = f"| **{w:.1f}%** | " + " | ".join(
-                        f"₹{grid[i][j]:,.0f}" for j in range(len(tgr_range))
-                    ) + " |"
+                    cells = []
+                    for j in range(len(tgr_range)):
+                        v = grid[i][j]
+                        cells.append(f"₹{v:,.0f}" if v is not None else "N/A")
+                    row = f"| **{w:.1f}%** | " + " | ".join(cells) + " |"
                     a(row)
                 a("")
         else:
             a(f"> ⚠️ DCF not available — {dcf.get('reason', 'unknown')}\n")
+
+        # ── SOTP Valuation ───────────────────────────────────
+        sotp = analysis.get('sotp', {})
+        if sotp.get('available'):
+            a("## 🧩 Sum-of-the-Parts (SOTP) Valuation\n")
+            a(f"**Method:** Segment-level EV/EBITDA valuation with "
+              f"holding-company discount\n")
+
+            seg_vals = sotp.get('segment_valuations', [])
+            if seg_vals:
+                a("| Segment | Revenue (₹ Cr) | EBITDA (₹ Cr) | "
+                  "EV/EBITDA | Segment EV (₹ Cr) |")
+                a("|---------|---------------:|-------------:|--------:|------------------:|")
+                for sv in seg_vals:
+                    rev = f"{sv['revenue']:,.0f}" if sv.get('revenue') is not None else 'N/A'
+                    ebitda = f"{sv['ebitda']:,.0f}" if sv.get('ebitda') is not None else 'N/A'
+                    mult = f"{sv['ev_ebitda_multiple']:.1f}x" if sv.get('ev_ebitda_multiple') is not None else 'N/A'
+                    sev = f"{sv['segment_ev']:,.0f}" if sv.get('segment_ev') is not None else 'N/A'
+                    a(f"| {sv.get('segment', '?')} "
+                      f"| {rev} "
+                      f"| {ebitda} "
+                      f"| {mult} "
+                      f"| {sev} |")
+                a("")
+
+            a("| SOTP Metric | Value |")
+            a("|-------------|------:|")
+            _total_ev = sotp.get('total_ev')
+            a(f"| Sum of Segment EVs | {f'₹{_total_ev:,.0f} Cr' if _total_ev is not None else 'N/A'} |")
+            disc = sotp.get('holding_company_discount')
+            a(f"| Holding Company Discount | {f'{disc:.0f}%' if disc is not None else 'N/A'} |")
+            _net_debt = sotp.get('net_debt')
+            a(f"| Net Debt | {f'₹{_net_debt:,.0f} Cr' if _net_debt is not None else 'N/A'} |")
+            _eq_val = sotp.get('equity_value')
+            a(f"| SOTP Equity Value | {f'₹{_eq_val:,.0f} Cr' if _eq_val is not None else 'N/A'} |")
+            _iv = sotp.get('intrinsic_value')
+            a(f"| **SOTP Intrinsic Value / Share** | "
+              f"**{f'₹{_iv:,.2f}' if _iv is not None else 'N/A'}** |")
+            _cp = sotp.get('current_price')
+            a(f"| Current Market Price | {f'₹{_cp:,.2f}' if _cp is not None else 'N/A'} |")
+            sotp_up = sotp.get('upside_pct')
+            if sotp_up is not None:
+                icon = "🟢" if sotp_up > 10 else ("🟡" if sotp_up > -10 else "🔴")
+                a(f"| SOTP Upside / Downside | {icon} {sotp_up:+.1f}% |")
+            else:
+                a("| SOTP Upside / Downside | N/A |")
+            a("")
+
+            a("> 💡 *SOTP is most useful for conglomerates with diverse business "
+              "segments. Discount reflects limited market for controlling stake.*\n")
 
         # ── CFO / EBITDA Quality ─────────────────────────────
         cfo = analysis.get('cfo_ebitda_check', {})
@@ -363,13 +579,21 @@ class ReportGenerator:
             for cat, vals in shp.items():
                 if cat == 'PromoterPledging':
                     continue  # Handled separately below
+                # OCR cleanup: PDF parsers confuse I/l in FIIs/DIIs
+                cat_display = (cat.replace('Flls', 'FIIs')
+                                  .replace('Dils', 'DIIs')
+                                  .replace('FlIs', 'FIIs')
+                                  .replace('DlIs', 'DIIs')
+                                  .replace('Flls', 'FIIs')
+                                  .replace('FIls', 'FIIs')
+                                  .replace('DIls', 'DIIs'))
                 cur = vals.get('current', 'N/A')
                 prv = vals.get('previous', 'N/A')
                 if isinstance(cur, (int, float)) and isinstance(prv, (int, float)):
                     delta = f"{cur - prv:+.2f}"
                 else:
                     delta = "—"
-                a(f"| {cat} | {cur} | {prv} | {delta} |")
+                a(f"| {cat_display} | {cur} | {prv} | {delta} |")
             a("")
 
             # Promoter Pledging
@@ -459,6 +683,43 @@ class ReportGenerator:
                 a(f"| {seg.get('name', '?')} | {rev} | {ebit} | {margin} | {pct} |")
             a("")
 
+        # ── Forensic Dashboard (Unified) ────────────────────
+        forensic_db = analysis.get('forensic_dashboard', {})
+        if forensic_db.get('available'):
+            a("## 🔬 Forensic Earnings Quality Dashboard\n")
+            quality = forensic_db.get('quality_rating', 'N/A')
+            f_score = forensic_db.get('forensic_score')
+            q_icon = {'EXCELLENT': '🟢', 'GOOD': '🟢',
+                      'AVERAGE': '🟡', 'POOR': '🔴',
+                      'VERY_POOR': '🔴'}.get(quality, '⚪')
+            a(f"**{q_icon} Forensic Score: {f_score if f_score is not None else 'N/A'}/10 — {quality}**\n")
+            a(f"Passed: {forensic_db.get('num_passed', 0)} / "
+              f"{forensic_db.get('num_checks', 0)} checks\n")
+
+            checks = forensic_db.get('checks', [])
+            if checks:
+                a("| # | Check | Result | Details |")
+                a("|--:|-------|:------:|---------|")
+                for i, chk in enumerate(checks, 1):
+                    status = chk.get('status', 'N/A')
+                    # No emoji prefix — just the status word to prevent
+                    # PDF text wrapping "PAS S" in narrow columns
+                    a(f"| {i} | {chk.get('name', '?')} "
+                      f"| {status} "
+                      f"| {chk.get('detail', '')[:150]} |")
+                a("")
+
+            red_flags = forensic_db.get('red_flags', [])
+            if red_flags:
+                a("### 🚩 Red Flags\n")
+                for rf in red_flags:
+                    sev = rf.get('severity', 'MEDIUM')
+                    sev_icon = {'HIGH': '🔴', 'MEDIUM': '🟡',
+                                'LOW': '🟢'}.get(sev, '⚪')
+                    a(f"- {sev_icon} **[{sev}] {rf.get('category', '')}:** "
+                      f"{rf.get('detail', '')}")
+                a("")
+
         # ── Governance Dashboard ─────────────────────────────
         governance = analysis.get('governance', {})
         if governance.get('available'):
@@ -498,7 +759,7 @@ class ReportGenerator:
         moat = analysis.get('moat', {})
         if moat.get('available'):
             a("## 🏰 Competitive Moat Analysis\n")
-            a(f"**Moat Score: {moat.get('moat_score', 0)}/10** "
+            a(f"**Moat Score: {moat.get('moat_score', 'N/A')}/10** "
               f"| Dominant: **{moat.get('dominant_moat', 'None')}**\n")
 
             advantages = moat.get('competitive_advantages', [])
@@ -520,11 +781,58 @@ class ReportGenerator:
                 for cl in claims[:5]:
                     a(f"> {cl}\n")
 
+        # ── Say-Do Ratio ─────────────────────────────────────
+        say_do = analysis.get('say_do', {})
+        if say_do.get('available'):
+            a("## 🤝 Say-Do Ratio — Management Credibility\n")
+            _n_tracked = say_do.get('num_promises_tracked', 0)
+            _n_delivered = say_do.get('num_delivered', 0)
+            # Force recalculate: ratio = delivered / tracked (never trust cached value)
+            if _n_tracked > 0:
+                sd_ratio = round(_n_delivered / _n_tracked, 2)
+            else:
+                sd_ratio = None
+            cred = say_do.get('credibility_rating', 'N/A')
+            # Guard: if zero promises tracked, ratio is meaningless
+            if _n_tracked == 0:
+                sd_ratio = None
+                cred = 'INSUFFICIENT_DATA' if cred not in ('INSUFFICIENT_DATA',) else cred
+            cred_icon = {'EXCELLENT': '🟢', 'GOOD': '🟢',
+                         'FAIR': '🟡', 'POOR': '🔴',
+                         'VERY_POOR': '🔴'}.get(cred, '⚪')
+            a(f"**{cred_icon} Say-Do Ratio: {f'{sd_ratio:.2f}' if sd_ratio is not None else 'N/A'} — {cred}**\n")
+            a(f"Promises Tracked: {_n_tracked} | "
+              f"Delivered: {say_do.get('num_delivered', 0)} | "
+              f"Missed: {say_do.get('num_missed', 0)}\n")
+
+            if say_do.get('is_governance_risk'):
+                a("> 🔴 **GOVERNANCE RISK:** Management consistently misses "
+                  "its own guidance — credibility below acceptable threshold.\n")
+
+            comparisons = say_do.get('comparisons', [])
+            if comparisons:
+                a("| Topic | Promise | Actual | Status |")
+                a("|-------|---------|--------|:------:|")
+                for comp in comparisons[:10]:
+                    status = comp.get('status', 'N/A')
+                    s_icon = {'DELIVERED': '✅', 'MISSED': '❌',
+                              'PARTIAL': '⚠️', 'PENDING': '⏳'}.get(status, '?')
+                    a(f"| {comp.get('topic', '?')} "
+                      f"| {comp.get('promise', '?')[:60]} "
+                      f"| {comp.get('actual', '?')[:60]} "
+                      f"| {s_icon} {status} |")
+                a("")
+
+            from config import config as _cfg_sd
+            _sd_t = _cfg_sd.validation.say_do_threshold
+            a(f"> 💡 *Say-Do Ratio > 1.0 means management over-delivers; "
+              f"< {_sd_t} indicates persistent over-promising.*\n")
+
         # ── ESG / BRSR ──────────────────────────────────────
         esg = analysis.get('esg', {})
         if esg.get('available'):
             a("## 🌱 ESG / BRSR Intelligence\n")
-            a(f"**ESG Score: {esg.get('esg_score', 0)}/10** "
+            a(f"**ESG Score: {esg.get('esg_score', 'N/A')}/10** "
               f"| BRSR: {'✅ Found' if esg.get('brsr_found') else '❌ Not found'}\n")
 
             metrics = esg.get('metrics', {})
@@ -603,15 +911,29 @@ class ReportGenerator:
                 a(f"**{mgmt.get('summary', 'N/A')}**\n")
                 comps = mgmt.get('comparisons', [])
                 if comps:
+                    # ── Aggregate duplicates: one row per topic ─────
+                    from collections import defaultdict, Counter
+                    _topic_agg = defaultdict(lambda: {'cur': [], 'pri': [], 'delta': [], 'sev': []})
+                    for c in comps:
+                        t = c.get('topic', '?')
+                        _topic_agg[t]['cur'].append(c.get('current_sentiment', 0))
+                        _topic_agg[t]['pri'].append(c.get('prior_sentiment', 0))
+                        d = c.get('delta', {})
+                        _topic_agg[t]['delta'].append(d.get('delta', 0))
+                        _topic_agg[t]['sev'].append(d.get('severity', '?'))
+
                     a("| Topic | Current Sent. | Prior Sent. | Δ | Signal |")
                     a("|-------|:------------:|:-----------:|--:|--------|")
-                    for c in comps[:8]:
-                        d = c.get('delta', {})
-                        a(f"| {c.get('topic', '?')} | "
-                          f"{c.get('current_sentiment', 0):.2f} | "
-                          f"{c.get('prior_sentiment', 0):.2f} | "
-                          f"{d.get('delta', 0):+.2f} | "
-                          f"{d.get('severity', '?')} |")
+                    for topic, vals in _topic_agg.items():
+                        _cur = sum(vals['cur']) / len(vals['cur'])
+                        _pri = sum(vals['pri']) / len(vals['pri'])
+                        _dlt = sum(vals['delta']) / len(vals['delta'])
+                        _sev = Counter(vals['sev']).most_common(1)[0][0]
+                        a(f"| {topic} | "
+                          f"{_cur:.2f} | "
+                          f"{_pri:.2f} | "
+                          f"{_dlt:+.2f} | "
+                          f"{_sev} |")
                     a("")
 
             # Key Themes
@@ -621,7 +943,8 @@ class ReportGenerator:
                 for query, snippets in themes.items():
                     a(f"**{query.title()}:**")
                     for s in snippets[:2]:
-                        a(f"> {s[:200]}…\n")
+                        snip = self._smart_truncate(s, 600)
+                        a(f"> {snip}\n")
                 a("")
 
         # ── Text Intelligence (NEW) ──────────────────────────
@@ -649,32 +972,32 @@ class ReportGenerator:
             if status:
                 a("### Company Status\n")
                 for s in status[:5]:
-                    a(f"> {s[:300]}\n")
+                    a(f"> {self._smart_truncate(s, 500)}\n")
 
             plans = text_intel.get('plans', [])
             if plans:
                 a("### Plans & Strategy\n")
                 for p in plans[:5]:
-                    a(f"> {p[:300]}\n")
+                    a(f"> {self._smart_truncate(p, 500)}\n")
 
             risks = text_intel.get('risks', [])
             if risks:
                 a("### Risk Signals (from text)\n")
                 for r in risks[:5]:
-                    a(f"> ⚠️ {r[:300]}\n")
+                    a(f"> ⚠️ {self._smart_truncate(r, 500)}\n")
 
             opps = text_intel.get('opportunities', [])
             if opps:
                 a("### Opportunities\n")
                 for o in opps[:5]:
-                    a(f"> 🟢 {o[:300]}\n")
+                    a(f"> 🟢 {self._smart_truncate(o, 500)}\n")
 
             # Forward-looking statements
             fwd = text_intel.get('forward_looking', [])
             if fwd:
                 a("### Forward-Looking Statements\n")
                 for f_stmt in fwd[:5]:
-                    a(f"- {f_stmt[:350]}")
+                    a(f"- {self._smart_truncate(f_stmt, 600)}")
                 a("")
 
             # Topic breakdown with sentiment
@@ -698,13 +1021,35 @@ class ReportGenerator:
         # ── Predictive Model ─────────────────────────────────
         pred = analysis.get('prediction', {})
         if pred.get('available'):
-            a("## 📈 Price Forecast (30-Day ARIMA-ETS Ensemble)\n")
+            garch_name = pred.get('garch_model', 'N/A')
+            if garch_name and garch_name != 'N/A':
+                a(f"## 📈 Price Forecast (ARIMA-ETS + {garch_name} Volatility)\n")
+            else:
+                a("## 📈 Price Forecast (30-Day ARIMA-ETS Ensemble)\n")
             a("| Metric | Value |")
             a("|--------|------:|")
-            a(f"| Last Close | ₹{pred.get('last_price', 0):,.2f} |")
-            a(f"| 30-Day Target | ₹{pred.get('end_price', 0):,.2f} |")
-            a(f"| Expected Move | {pred.get('pct_change_30d', 0):+.1f}% |")
+            _lp = pred.get('last_price')
+            a(f"| Last Close | {f'₹{_lp:,.2f}' if _lp is not None else 'N/A'} |")
+            _ep = pred.get('end_price')
+            a(f"| 30-Day Target | {f'₹{_ep:,.2f}' if _ep is not None else 'N/A'} |")
+            _pc = pred.get('pct_change_30d')
+            a(f"| Expected Move | {f'{_pc:+.1f}%' if _pc is not None else 'N/A'} |")
             a(f"| Trend Signal | **{pred.get('trend', 'N/A')}** |")
+
+            # GARCH volatility metrics
+            _vol_regime = pred.get('vol_regime')
+            if _vol_regime and _vol_regime != 'Unknown':
+                regime_icon = {'LOW': '🟢', 'MEDIUM': '🟡', 'HIGH': '🔴'}.get(
+                    _vol_regime, '⚪')
+                a(f"| Volatility Regime | {regime_icon} **{_vol_regime}** |")
+            _ann_vol = pred.get('annualised_vol_pct')
+            if _ann_vol is not None:
+                a(f"| Annualised Volatility | {_ann_vol:.1f}% |")
+            _cond_vol = pred.get('conditional_vol_pct')
+            if _cond_vol is not None:
+                a(f"| Current Conditional σ | {_cond_vol:.2f}% (daily) |")
+            if garch_name and garch_name != 'N/A':
+                a(f"| Volatility Model | {garch_name} (Student-t) |")
             a("")
 
             # Confidence interval endpoints
@@ -712,7 +1057,7 @@ class ReportGenerator:
             ci_hi = pred.get('ci_upper', [])
             if ci_lo and ci_hi:
                 a(f"> 95% Confidence Band (Day 30): "
-                  f"₹{ci_lo[-1]:,.2f} — ₹{ci_hi[-1]:,.2f}\n")
+                  f"Rs. {ci_lo[-1]:,.2f} - Rs. {ci_hi[-1]:,.2f}\n")
 
             a("> ⚠️ *Statistical model — not investment advice. "
               "Past patterns may not persist.*\n")
@@ -838,6 +1183,98 @@ class ReportGenerator:
                 a(f"| Sector Correlation | {sect_corr} |")
             a("")
 
+        # ── Macro-Correlation Engine ─────────────────────────
+        macro_corr = analysis.get('macro_corr', {})
+        if macro_corr.get('available'):
+            a("## 🌐 Macro-Correlation Engine (ARDL)\n")
+
+            # ARDL summary
+            ardl = macro_corr.get('ardl', {})
+            if ardl:
+                a(f"**ARDL Model R²: {ardl.get('r_squared', 0):.3f}** "
+                  f"| Significant Macro Factors: "
+                  f"{len(ardl.get('significant_factors', []))}\n")
+                sig_factors = ardl.get('significant_factors', [])
+                coefficients = ardl.get('coefficients', {})
+                if sig_factors:
+                    a("| Factor | Lag | Coeff | p-value |")
+                    a("|--------|----:|------:|--------:|")
+                    for sf in sig_factors:
+                        if isinstance(sf, dict):
+                            # Already a dict with full details
+                            a(f"| {sf.get('factor', '?')} "
+                              f"| {sf.get('lag', 0)} "
+                              f"| {sf.get('coefficient', 0):.4f} "
+                              f"| {sf.get('p_value', 1):.4f} |")
+                        else:
+                            # sf is a string key like 'crude_oil_lag1'
+                            info = coefficients.get(sf, {})
+                            # Parse lag from name (e.g. 'crude_oil_lag5' → 5)
+                            lag_num = ''
+                            if '_lag' in str(sf):
+                                lag_num = str(sf).rsplit('_lag', 1)[-1]
+                            a(f"| {sf} "
+                              f"| {lag_num} "
+                              f"| {info.get('coefficient', 0):.4f} "
+                              f"| {info.get('p_value', 1):.4f} |")
+                    a("")
+
+            # Correlations table
+            correlations = macro_corr.get('correlations', {})
+            if correlations:
+                a("### Macro Correlations (Lag 0 / 5-day / 20-day)\n")
+                a("| Macro Variable | Lag-0 | Lag-5 | Lag-20 |")
+                a("|----------------|------:|------:|-------:|")
+                for var_name, corr_data in correlations.items():
+                    lags = corr_data.get('lags', corr_data)
+                    l0 = lags.get('lag_0d', lags.get('lag_0', 'N/A'))
+                    l5 = lags.get('lag_5d', lags.get('lag_5', 'N/A'))
+                    l20 = lags.get('lag_20d', lags.get('lag_20', 'N/A'))
+                    if isinstance(l0, float):
+                        l0 = f"{l0:.3f}"
+                    if isinstance(l5, float):
+                        l5 = f"{l5:.3f}"
+                    if isinstance(l20, float):
+                        l20 = f"{l20:.3f}"
+                    a(f"| {var_name} | {l0} | {l5} | {l20} |")
+                a("")
+
+            # Sector sensitivity
+            sect_sens = macro_corr.get('sector_sensitivity', {})
+            if sect_sens:
+                a("### Sector Macro Sensitivity\n")
+                sector_name = sect_sens.get('sector',
+                              sect_sens.get('matched_sector',
+                              macro_corr.get('sector', 'N/A')))
+                a(f"**Sector:** {sector_name.title()}\n")
+                # Try key_indicators list format first
+                indicators = sect_sens.get('key_indicators', [])
+                if indicators:
+                    for ind in indicators:
+                        level = ind.get('sensitivity', 'LOW')
+                        l_icon = {'HIGH': '🔴', 'MEDIUM': '🟡',
+                                  'LOW': '🟢'}.get(level, '⚪')
+                        a(f"- {l_icon} **{ind.get('indicator', '?')}** "
+                          f"— Sensitivity: {level}")
+                    a("")
+                # Fallback: profile dict format
+                elif sect_sens.get('profile'):
+                    profile = sect_sens['profile']
+                    for indicator, level in profile.items():
+                        l_icon = {'HIGH': '🔴', 'MEDIUM': '🟡',
+                                  'LOW': '🟢'}.get(level, '⚪')
+                        a(f"- {l_icon} **{indicator.replace('_', ' ').title()}** "
+                          f"— Sensitivity: {level}")
+                    a("")
+
+            # Signals
+            signals = macro_corr.get('signals', [])
+            if signals:
+                a("### Macro Signals\n")
+                for sig in signals:
+                    a(f"- {sig}")
+                a("")
+
         # ── Macro Context ────────────────────────────────────
         macro = data.get('macro', {})
         if macro.get('available'):
@@ -868,7 +1305,10 @@ class ReportGenerator:
             ts = validation.get('trust_score')
             tl = validation.get('trust_label', '')
             if ts is not None:
-                icon = "🟢" if ts >= 80 else ("🟡" if ts >= 60 else ("🟠" if ts >= 40 else "🔴"))
+                from config import config as _cfg
+                _v = _cfg.validation
+                icon = ("🟢" if ts >= _v.trust_high
+                        else ("🟡" if ts >= _v.trust_moderate else "🔴"))
                 a(f"**{icon} Trust Score: {ts} / 100 — {tl}**\n")
                 a("> The Trust Score measures how closely the scraped financial "
                   "data matches the official Annual Report. A high score means "
@@ -880,17 +1320,20 @@ class ReportGenerator:
                 a("| # | Metric | Scraper | Annual Report | Status |")
                 a("|--:|--------|--------:|--------------:|:------:|")
                 for i, chk in enumerate(checks, 1):
-                    status_icon = {"MATCH": "✅", "MISMATCH": "❌",
-                                   "PARTIAL": "⚠️", "SKIPPED": "⏭️"
-                                   }.get(chk.get('status', ''), '?')
+                    # Use plain text status — emojis garble in PDF
+                    status_text = chk.get('status', 'N/A')
                     scraper_val = chk.get('scraper_value', 'N/A')
                     ar_val = chk.get('ar_value', 'N/A')
                     if isinstance(scraper_val, float):
                         scraper_val = f"{scraper_val:,.2f}"
                     if isinstance(ar_val, float):
-                        ar_val = f"{ar_val:,.2f}"
+                        # Show normalised (Crore) value when unit-adjusted
+                        if chk.get('unit_adjusted') and chk.get('ar_value_normalised') is not None:
+                            ar_val = f"{chk['ar_value_normalised']:,.2f} (Cr)"
+                        else:
+                            ar_val = f"{ar_val:,.2f}"
                     a(f"| {i} | {chk.get('metric', '?')} "
-                      f"| {scraper_val} | {ar_val} | {status_icon} |")
+                      f"| {scraper_val} | {ar_val} | {status_text} |")
                 a("")
 
             fn_flags = validation.get('footnote_flags', [])
@@ -902,7 +1345,9 @@ class ReportGenerator:
                     sev = fl.get('severity', 'LOW')
                     sev_icon = {"CRITICAL": "🔴", "HIGH": "🟠",
                                 "MEDIUM": "🟡", "LOW": "🟢"}.get(sev, "⚪")
-                    a(f"| {sev_icon} {sev} | {fl.get('flag', '')} "
+                    flag_label = (fl.get('title') or
+                                  fl.get('type', '').replace('_', ' ').title())
+                    a(f"| {sev_icon} {sev} | {flag_label} "
                       f"| {fl.get('impact', '')} |")
                 a("")
 
@@ -977,29 +1422,54 @@ class ReportGenerator:
                          "Piotroski F-Score signals poor financial health.")
 
         de = ratios.get('debt_to_equity')
-        if de is not None and isinstance(de, (int, float)) and de > 1.5:
-            risks.append(f"🟡 **High Leverage** — D/E of {de:.2f} exceeds "
-                         "comfortable range.")
+        # D/E threshold: compare to peer median if available, else flag extremes only
+        peer = analysis.get('peer_cca', {})
+        peer_de_median = peer.get('sector_de_median')
+        if de is not None and isinstance(de, (int, float)):
+            if peer_de_median is not None and de > peer_de_median * 2:
+                risks.append(f"🟡 **High Leverage** — D/E of {de:.2f} is {de/peer_de_median:.1f}× "
+                             f"the sector median ({peer_de_median:.2f}).")
+            elif peer_de_median is None and de > 3.0:
+                # Without peer context, only flag genuinely extreme leverage
+                risks.append(f"🟡 **High Leverage** — D/E of {de:.2f} (no peer comparison available).")
 
         pg = ratios.get('profit_growth')
-        if pg is not None and pg < -10:
+        if pg is not None and pg < 0:
+            # Flag any declining profits — severity is proportional to the decline
             risks.append(f"🟡 **Declining Profits** — YoY profit growth {pg:+.1f} %.")
 
         pe = ratios.get('pe_ratio')
-        if pe is not None and isinstance(pe, (int, float)) and pe > 50:
-            risks.append(f"🟡 **Rich Valuation** — P/E {pe:.1f}x is well above "
-                         "market average.")
+        # P/E threshold: compare to peer/sector P/E if available
+        sector_pe = peer.get('sector_pe_median')
+        if pe is not None and isinstance(pe, (int, float)):
+            if sector_pe is not None and pe > sector_pe * 2:
+                risks.append(f"🟡 **Rich Valuation** — P/E {pe:.1f}x is {pe/sector_pe:.1f}× "
+                             f"the sector median ({sector_pe:.1f}x).")
+            elif sector_pe is None and pe > 100:
+                # Without sector context, only flag extreme P/E
+                risks.append(f"🟡 **Rich Valuation** — P/E {pe:.1f}x (no peer comparison available).")
 
         if dcf.get('available'):
+            dcf_guardrail = dcf.get('dcf_ev_mismatch', False)
+            _data_suspended = analysis.get('rating', {}).get('data_suspended', False)
             up = dcf.get('upside_pct')
-            if up is not None and up < -20:
+            # Only reference DCF valuation if neither guardrail nor
+            # data-suspension was triggered.
+            if up is not None and up < 0 and not dcf_guardrail and not _data_suspended:
                 risks.append(f"🔴 **Overvalued per DCF** — "
                              f"Stock appears {abs(up):.1f} % overvalued.")
+            elif dcf_guardrail:
+                from config import config as _cfg
+                _ev_d = dcf.get('ev_delta_pct', '?')
+                _ev_t = _cfg.validation.dcf_ev_threshold_pct
+                risks.append(
+                    f"EV deviation {_ev_d}% exceeds {_ev_t:.0f}% threshold; DCF valuation suppressed."
+                )
 
         ic = ratios.get('interest_coverage')
-        if ic is not None and isinstance(ic, (int, float)) and ic < 2:
+        if ic is not None and isinstance(ic, (int, float)) and ic < 1:
             risks.append(f"🟡 **Low Interest Coverage** — {ic:.2f}x; "
-                         "may struggle to service debt.")
+                         "earnings do not cover interest expense.")
 
         # CFO/EBITDA red flag
         cfo = analysis.get('cfo_ebitda_check', {})
@@ -1047,9 +1517,11 @@ class ReportGenerator:
 
         # Governance red flag
         governance = analysis.get('governance', {})
-        if governance.get('available') and governance.get('governance_score', 10) < 5:
-            risks.append(f"🟡 **Governance Concerns** — "
-                         f"Score {governance.get('governance_score')}/10")
+        if governance.get('available'):
+            _gs = governance.get('governance_score')
+            if _gs is not None and _gs < 5:
+                risks.append(f"🟡 **Governance Concerns** — "
+                             f"Score {_gs}/10")
 
         # Technical signal red flag
         tech = analysis.get('technicals', {})
@@ -1065,8 +1537,35 @@ class ReportGenerator:
         # 5Y Trend deterioration
         trends = analysis.get('trends', {})
         if trends.get('available') and trends.get('overall_direction') == 'DETERIORATING':
+            _th = trends.get('health_score')
             risks.append(f"🔴 **Deteriorating 5Y Trends** — "
-                         f"Health score {trends.get('health_score', 0)}/10")
+                         f"Health score {_th if _th is not None else 'N/A'}/10")
+
+        # Forensic Dashboard red flags
+        forensic_db = analysis.get('forensic_dashboard', {})
+        if forensic_db.get('available'):
+            for rf in forensic_db.get('red_flags', []):
+                if rf.get('severity') == 'HIGH':
+                    risks.append(f"🔴 **Forensic: {rf.get('category', '')}** — "
+                                 f"{rf.get('detail', '')[:100]}")
+
+        # Say-Do governance risk
+        say_do = analysis.get('say_do', {})
+        if say_do.get('available') and say_do.get('is_governance_risk'):
+            from config import config as _cfg
+            _sdr = say_do.get('say_do_ratio')
+            risks.append(f"🔴 **Management Credibility Risk** — "
+                         f"Say-Do Ratio {f'{_sdr:.2f}' if _sdr is not None else 'N/A'} "
+                         f"(below {_cfg.validation.say_do_threshold} threshold)")
+
+        # Macro headwinds
+        macro_corr = analysis.get('macro_corr', {})
+        if macro_corr.get('available'):
+            headwinds = [s for s in macro_corr.get('signals', [])
+                         if 'headwind' in s.lower()]
+            if len(headwinds) >= 2:
+                risks.append(f"🟡 **Multiple Macro Headwinds** — "
+                             f"{len(headwinds)} adverse macro factors detected")
 
         return risks
 

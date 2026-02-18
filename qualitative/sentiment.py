@@ -118,17 +118,22 @@ class SentimentAnalyzer:
         overall_score = round(float(np.mean(scores)), 4)
         score_std = round(float(np.std(scores)), 4)
 
-        # Classify overall tone
-        if overall_score > 0.2:
-            tone = 'BULLISH'
-        elif overall_score > 0.05:
-            tone = 'MILDLY POSITIVE'
-        elif overall_score > -0.05:
-            tone = 'NEUTRAL'
-        elif overall_score > -0.2:
-            tone = 'CAUTIOUS'
+        # Classify overall tone — thresholds derived from the data
+        # Use score distribution: > mean+1σ = BULLISH, > mean+0.5σ = MILDLY POSITIVE, etc.
+        if score_std > 0:
+            pos_strong = score_std      # ~1 standard deviation above 0
+            pos_mild = score_std * 0.3  # ~0.3 standard deviations
+            tone = (
+                'BULLISH' if overall_score > pos_strong else
+                'MILDLY POSITIVE' if overall_score > pos_mild else
+                'NEUTRAL' if overall_score > -pos_mild else
+                'CAUTIOUS' if overall_score > -pos_strong else
+                'BEARISH'
+            )
         else:
-            tone = 'BEARISH'
+            # Single chunk or zero variance — use sign
+            tone = 'BULLISH' if overall_score > 0 else (
+                'BEARISH' if overall_score < 0 else 'NEUTRAL')
 
         result = {
             'available': True,
@@ -138,6 +143,8 @@ class SentimentAnalyzer:
             'num_chunks': len(scores),
             'chunk_scores': scores,
         }
+        # Cache std for sub-section classification
+        self._last_std = score_std if score_std > 0 else 0.1
 
         # Score Management Remarks section separately
         if mgmt_text and len(mgmt_text) > 200:
@@ -223,16 +230,19 @@ class SentimentAnalyzer:
     # ------------------------------------------------------------------
     # Tone classification helper
     # ------------------------------------------------------------------
-    @staticmethod
-    def _classify_tone(score: float) -> str:
-        """Classify a sentiment score into a tone label."""
-        if score > 0.2:
+    def _classify_tone(self, score: float) -> str:
+        """Classify a sentiment score using data-relative thresholds."""
+        # Use the cached std from the overall transcript analysis
+        std = getattr(self, '_last_std', 0.1)
+        pos_strong = std
+        pos_mild = std * 0.3
+        if score > pos_strong:
             return 'BULLISH'
-        elif score > 0.05:
+        elif score > pos_mild:
             return 'MILDLY POSITIVE'
-        elif score > -0.05:
+        elif score > -pos_mild:
             return 'NEUTRAL'
-        elif score > -0.2:
+        elif score > -pos_strong:
             return 'CAUTIOUS'
         return 'BEARISH'
 
@@ -241,24 +251,32 @@ class SentimentAnalyzer:
     # ------------------------------------------------------------------
     @staticmethod
     def compute_delta(current_score: float,
-                      previous_score: float) -> dict:
+                      previous_score: float,
+                      score_std: float = None) -> dict:
         """
         Compute the Sentiment Delta between two quarters.
 
         A sudden negative shift often precedes stock decline.
+        Thresholds derived from the data's own variability.
         """
         delta = current_score - previous_score
 
-        if delta < -0.15:
+        # Use provided std or estimate from the two scores themselves
+        if score_std is None or score_std <= 0:
+            score_std = max(abs(current_score), abs(previous_score), 0.1)
+        strong_thresh = score_std       # ~1σ shift
+        mild_thresh = score_std * 0.3   # ~0.3σ shift
+
+        if delta < -strong_thresh:
             signal = '🔴 SHARP DECLINE in management confidence'
             severity = 'HIGH'
-        elif delta < -0.05:
+        elif delta < -mild_thresh:
             signal = '🟡 Noticeable dip in management tone'
             severity = 'MEDIUM'
-        elif delta > 0.15:
+        elif delta > strong_thresh:
             signal = '🟢 Significant improvement in management confidence'
             severity = 'POSITIVE'
-        elif delta > 0.05:
+        elif delta > mild_thresh:
             signal = '🟢 Mild improvement in tone'
             severity = 'LOW_POSITIVE'
         else:

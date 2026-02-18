@@ -86,7 +86,10 @@ class RAGAgent:
             ]:
                 hits = self._rag.search(query, top_k=2)
                 if hits:
-                    themes[query] = [h['text'][:300] for h in hits]
+                    themes[query] = [
+                        self._rag.smart_truncate(h['text'], 500)
+                        for h in hits
+                    ]
             result['key_themes'] = themes
         else:
             result['key_themes'] = {}

@@ -88,14 +88,27 @@ class FinancialRatios:
             )
 
         # ── Market-price dependent ──
-        if not price_df.empty and not np.isnan(eps) and eps > 0:
+        # Use TTM EPS for P/E to ensure temporal consistency
+        # (Current Price / Trailing Twelve Month EPS)
+        ttm_eps = data.get('ttm_eps')
+        pe_eps = None  # The EPS actually used for P/E
+
+        if ttm_eps is not None and ttm_eps > 0:
+            pe_eps = ttm_eps
+            r['ttm_eps'] = round(ttm_eps, 2)
+        elif not np.isnan(eps) and eps > 0:
+            pe_eps = eps  # Fall back to annual EPS only if TTM unavailable
+        r['eps'] = round(eps, 2) if not np.isnan(eps) else None
+
+        if not price_df.empty and pe_eps is not None and pe_eps > 0:
             cmp = (
                 float(price_df['close'].iloc[-1])
                 if 'close' in price_df.columns
                 else float(price_df.iloc[-1, 0])
             )
             r['current_price'] = round(cmp, 2)
-            r['pe_ratio']      = round(cmp / eps, 2)
+            r['pe_ratio']      = round(cmp / pe_eps, 2)
+            r['pe_eps_used']   = 'TTM' if ttm_eps is not None and ttm_eps > 0 else 'Annual'
 
             # Dividend yield
             if not np.isnan(div_dec) and div_dec > 0:

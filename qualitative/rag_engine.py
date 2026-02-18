@@ -66,6 +66,7 @@ class RAGEngine:
             return 0
 
         self._ensure_model()
+        text = self.clean_transcript_noise(text)
         chunks = self._chunk_text(text, chunk_size, overlap)
         added = 0
 
@@ -178,8 +179,125 @@ class RAGEngine:
         return len(self._chunks)
 
     @staticmethod
+    def clean_transcript_noise(text: str) -> str:
+        """Strip common PDF artefacts from BSE concall transcript text.
+
+        Handles both full-document cleaning and snippet-level cleaning.
+        Safe to call multiple times (idempotent).
+        """
+        if not text:
+            return text
+
+        # ── Full-document preamble removal ────────────────────
+        # Cut everything before the actual transcript body
+        for marker_re in [
+            r'Media\s*&?\s*Analyst\s+Call\s+Transcript',
+            r'Concall\s+Transcript',
+            r'Earnings\s+Call\s+Transcript',
+        ]:
+            m = re.search(marker_re, text, re.IGNORECASE)
+            if m:
+                text = text[m.end():]
+                break
+
+        # Remove digital-signature blocks
+        text = re.sub(
+            r'Digitally\s+signed\s+by.*?[\+\-]\d{2}\'\d{2}\'',
+            '', text, flags=re.DOTALL)
+
+        # ── Page-number + copyright footer (separate lines) ──
+        #    "42\n© Reliance Industries Limited 2020"
+        text = re.sub(
+            r'^\s*\d{1,3}\s*\n\s*©.*?(?:Limited|Ltd\.?)\s*\d{4}\s*$',
+            '', text, flags=re.MULTILINE)
+        # Standalone copyright line
+        text = re.sub(
+            r'^\s*©.*?(?:Limited|Ltd\.?)\s*\d{4}\s*$',
+            '', text, flags=re.MULTILINE)
+
+        # ── Inline page+copyright that lands mid-sentence ────
+        #    "...margins of 50% 8 © Reliance Industries Limited 2020 and this..."
+        text = re.sub(
+            r'\s*\d{1,3}\s+©\s+\w[\w\s]*?(?:Limited|Ltd\.?)\s*\d{4}\s*',
+            ' ', text)
+
+        # ── Speaker / questioner labels (own line) ───────────
+        text = re.sub(
+            r'^\s*Company\s+Speaker\s*\([^)]*\)\s*$',
+            '', text, flags=re.MULTILINE)
+        text = re.sub(
+            r'^\s*Questioner\s*\([^)]*\)\s*$',
+            '', text, flags=re.MULTILINE)
+
+        # ── Inline speaker prefix at start of a snippet ──────
+        text = re.sub(
+            r'^\s*(?:Company\s+Speaker|Questioner)\s*\([^)]*\)\s*',
+            '', text)
+
+        # ── Inline speaker/questioner labels anywhere in text ─
+        text = re.sub(
+            r'\s*(?:Company\s+Speaker|Questioner)\s*\([^)]*\)\s*',
+            ' ', text)
+
+        # ── Trailing ")" from a cut speaker name, e.g. "Srikanth) So we..." ──
+        text = re.sub(r'^[A-Z][a-zA-Z .]+\)\s+', '', text)
+
+        # ── Timestamp headers: "Name HH:MM:SS – HH:MM:SS (Topic)" ─
+        text = re.sub(
+            r'^.*?\d{1,2}:\d{2}:\d{2}\s*[–\-]\s*\d{1,2}:\d{2}:\d{2}.*$',
+            '', text, flags=re.MULTILINE)
+
+        # ── "RIL Q3 2025-2026" style headers ─────────────────
+        text = re.sub(
+            r'^\s*RIL\s+Q\d.*?\d{4}\s*$', '', text, flags=re.MULTILINE)
+
+        # ── Bare page numbers on their own line ──────────────
+        text = re.sub(r'^\s*\d{1,3}\s*$', '', text, flags=re.MULTILINE)
+
+        # ── Collapse whitespace ──────────────────────────────
+        text = re.sub(r'\n{3,}', '\n\n', text)
+        text = re.sub(r'  +', ' ', text)
+        return text.strip()
+
+    @staticmethod
+    def smart_truncate(text: str, max_chars: int = 300,
+                        ellipsis: bool = True) -> str:
+        """Truncate text at the nearest sentence boundary.
+
+        Prefers cutting after a full stop / question-mark / exclamation.
+        Falls back to the last comma / semicolon, then last word boundary.
+        Never cuts mid-word.
+        """
+        # Strip any residual transcript noise from the snippet
+        text = RAGEngine.clean_transcript_noise(text)
+        if len(text) <= max_chars:
+            return text
+
+        window = text[:max_chars]
+        # Try sentence boundary (.!?) — search backward from the limit
+        for delim in ['. ', '? ', '! ']:
+            idx = window.rfind(delim)
+            if idx > max_chars * 0.35:          # must keep ≥35 % of budget
+                return window[:idx + 1].strip()
+
+        # Try clause boundary (, ; — )
+        for delim in [', ', '; ', ' -- ', ' - ']:
+            idx = window.rfind(delim)
+            if idx > max_chars * 0.4:
+                result = window[:idx + 1].strip()
+                return result + (' …' if ellipsis else '')
+
+        # Last resort: word boundary
+        idx = window.rfind(' ')
+        if idx > 0:
+            result = window[:idx].rstrip('.,;:!?')
+            return result + (' …' if ellipsis else '')
+
+        return window  # shouldn't happen
+
+    @staticmethod
     def _chunk_text(text: str, size: int, overlap: int) -> list:
-        """Split text into overlapping chunks by character count."""
+        """Split text into overlapping chunks by word count."""
         words = text.split()
         chunks = []
         i = 0

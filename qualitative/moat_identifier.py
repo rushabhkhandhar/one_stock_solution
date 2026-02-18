@@ -126,10 +126,14 @@ class MoatIdentifier:
             max_score += config['weight']
             if hits:
                 # Score proportional to evidence strength
+                # Derive thresholds from text length (longer docs = more mentions expected)
                 total_mentions = sum(h['mentions'] for h in hits)
-                if total_mentions >= 5:
+                text_len_k = max(len(combined_lower) / 1000, 1)
+                # Normalize: mentions-per-1000-chars
+                mention_density = total_mentions / text_len_k
+                if mention_density >= 0.5:
                     earned = config['weight']
-                elif total_mentions >= 2:
+                elif mention_density >= 0.15:
                     earned = config['weight'] * 0.6
                 else:
                     earned = config['weight'] * 0.3
@@ -248,9 +252,19 @@ class MoatIdentifier:
 
         for pat in patterns:
             for m in pat.finditer(text):
-                start = max(0, m.start() - 50)
-                end = min(len(text), m.end() + 50)
+                # Expand to nearest sentence boundaries for readable context
+                start = max(0, m.start() - 80)
+                end = min(len(text), m.end() + 80)
                 context = text[start:end].replace('\n', ' ').strip()
-                claims.append(context)
+                # Trim to sentence boundary at start (skip partial lead)
+                dot_idx = context.find('. ')
+                if dot_idx > 0 and dot_idx < 40:
+                    context = context[dot_idx + 2:]
+                # Trim to sentence boundary at end
+                last_dot = context.rfind('.')
+                if last_dot > len(context) * 0.5:
+                    context = context[:last_dot + 1]
+                if len(context) > 30:
+                    claims.append(context.strip())
 
         return claims[:10]  # Cap at 10 claims

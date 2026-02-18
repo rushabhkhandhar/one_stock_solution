@@ -64,8 +64,12 @@ class TrendAnalyzer:
         # P&L trends
         for canonical, label in self.PNL_METRICS:
             series = pp.get(pnl, canonical).dropna()
-            trend = self._compute_trend(series, label)
+            is_ratio = (canonical == 'opm')
+            trend = self._compute_trend(series, label, is_ratio=is_ratio)
             if trend:
+                # Screener stores OPM% as decimal (0.14 = 14%)
+                if canonical == 'opm':
+                    trend['is_pct_decimal'] = True
                 trends.append(trend)
 
         # Balance Sheet trends
@@ -83,13 +87,21 @@ class TrendAnalyzer:
                 trends.append(trend)
 
         # Derived ratios (from preprocessing)
-        for key, label in [('roe', 'ROE'), ('debt_to_equity', 'D/E Ratio'),
-                           ('pat_margin', 'PAT Margin')]:
+        # roe, pat_margin are decimal (0.14 = 14%) → is_pct_decimal
+        # debt_to_equity is a pure ratio (0.37x)  → is_pure_ratio
+        _derived_ratios = [
+            ('roe',            'ROE',        True,  False),
+            ('debt_to_equity', 'D/E Ratio',  False, True),
+            ('pat_margin',     'PAT Margin', True,  False),
+        ]
+        for key, label, pct_dec, pure_ratio in _derived_ratios:
             series = data.get(key)
             if series is not None and isinstance(series, pd.Series):
                 series = series.dropna()
                 trend = self._compute_trend(series, label, is_ratio=True)
                 if trend:
+                    trend['is_pct_decimal'] = pct_dec
+                    trend['is_pure_ratio'] = pure_ratio
                     trends.append(trend)
 
         # ROCE from ratios DF
@@ -98,20 +110,23 @@ class TrendAnalyzer:
             roce = pp.get(ratios_df, 'roce').dropna()
             trend = self._compute_trend(roce, 'ROCE %', is_ratio=True)
             if trend:
+                # Screener stores ROCE% as decimal (0.14 = 14%)
+                trend['is_pct_decimal'] = True
                 trends.append(trend)
 
         if not trends:
             return {'available': False, 'reason': 'Insufficient data for trends'}
 
-        # Overall health assessment
+        # Overall health assessment — direction from proportion of improving metrics
         directions = [t['direction'] for t in trends]
         improving = sum(1 for d in directions if d == 'UP')
         declining = sum(1 for d in directions if d == 'DOWN')
         total = len(directions)
 
-        if improving > total * 0.6:
+        # Use natural thirds: >2/3 improving = IMPROVING, >2/3 declining = DETERIORATING
+        if total > 0 and improving > total * 2 / 3:
             overall = 'IMPROVING'
-        elif declining > total * 0.6:
+        elif total > 0 and declining > total * 2 / 3:
             overall = 'DETERIORATING'
         else:
             overall = 'STABLE'
@@ -150,16 +165,23 @@ class TrendAnalyzer:
 
         first, last = values[0], values[-1]
 
-        # Direction
+        # Direction — derived from data variability
         if n >= 3:
             # Use linear regression slope
             x = np.arange(n)
             slope, intercept = np.polyfit(x, values, 1)
-            direction = 'UP' if slope > 0.01 * abs(np.mean(values)) else \
-                        ('DOWN' if slope < -0.01 * abs(np.mean(values)) else 'FLAT')
+            # Use coefficient of variation as the noise floor
+            mean_val = abs(np.mean(values))
+            std_val = np.std(values)
+            # Slope is significant if it exceeds noise / sqrt(n)
+            noise_floor = std_val / np.sqrt(n) if n > 0 else 0
+            direction = 'UP' if slope > noise_floor else \
+                        ('DOWN' if slope < -noise_floor else 'FLAT')
         else:
-            direction = 'UP' if last > first * 1.02 else \
-                        ('DOWN' if last < first * 0.98 else 'FLAT')
+            # Two data points — compare directly
+            pct_diff = (last - first) / abs(first) if first != 0 else 0
+            direction = 'UP' if pct_diff > 0.02 else \
+                        ('DOWN' if pct_diff < -0.02 else 'FLAT')
             slope = (last - first) / max(1, n - 1)
             intercept = first
 
@@ -182,9 +204,12 @@ class TrendAnalyzer:
         if len(yoy_changes) >= 3:
             recent = np.mean(yoy_changes[-2:])
             older = np.mean(yoy_changes[:-2])
-            if recent > older + 2:
+            # Threshold = 1 std of YoY changes (data-relative)
+            yoy_std = np.std(yoy_changes) if len(yoy_changes) > 1 else 1.0
+            accel_thresh = max(yoy_std * 0.5, 0.5)  # at least 0.5pp to register
+            if recent > older + accel_thresh:
                 acceleration = 'ACCELERATING'
-            elif recent < older - 2:
+            elif recent < older - accel_thresh:
                 acceleration = 'DECELERATING'
             else:
                 acceleration = 'STEADY'

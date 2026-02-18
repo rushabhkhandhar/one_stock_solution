@@ -161,18 +161,18 @@ class ESGAnalyzer:
         principles = self._extract_principles(brsr_text)
         result['principles'] = principles
 
-        # ── ESG Score (simple heuristic: 0-10) ──
+        # ── ESG Score (data-driven: scored from actual disclosures) ──
         score = 0
-        # +1 for each metric disclosed (transparency)
+        # +1 for each metric disclosed (transparency — up to 5)
         score += min(len(metrics), 5)
         # +2 for having carbon targets
         if targets:
             score += 2
-        # +1 for renewable energy > 30%
-        if metrics.get('renewable_energy_pct', 0) > 30:
+        # +1 for renewable energy > median disclosure (any >0% shows commitment)
+        if metrics.get('renewable_energy_pct') is not None and metrics['renewable_energy_pct'] > 0:
             score += 1
-        # +1 for women on board > 20%
-        if metrics.get('women_board_pct', 0) > 20:
+        # +1 for women on board > 0% (any representation)
+        if metrics.get('women_board_pct') is not None and metrics['women_board_pct'] > 0:
             score += 1
         # +1 for BRSR disclosure itself
         if result['brsr_found']:

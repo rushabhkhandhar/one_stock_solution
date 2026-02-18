@@ -19,6 +19,7 @@ yfinance>=1.1                 # Nifty50, FII/DII, macro proxies
 # ── Step 2: Quantitative Engine ──────────────────────────
 statsmodels>=0.14             # ARIMA / ARIMAX, statistical tests
 scikit-learn>=1.6             # Preprocessing, peer clustering
+arch>=7.0                     # GARCH / EGARCH / GJR-GARCH volatility models
 
 # ── Step 3: Qualitative NLP & Sentiment ──────────────────
 transformers>=4.57            # FinBERT sentiment analysis
@@ -28,4 +29,9 @@ rank-bm25>=0.2                # Sparse BM25 search for RAG
 
 # ── Transitive (auto-installed) ──────────────────────────
 # scipy, sympy, huggingface-hub, tokenizers, safetensors,
+
+# ── Step 4: PDF Report Export ────────────────────────────
+fpdf2>=2.8                    # Pure-Python PDF generation (fallback)
+markdown2>=2.5                # Markdown → HTML conversion
+# weasyprint>=60               # (Optional) High-quality HTML→PDF; needs system libs
 # tqdm, regex, PyYAML, Jinja2, joblib, fsspec, etc.

@@ -125,23 +125,45 @@ class TextIntelligenceEngine:
         """
         all_texts = []
 
+        # Import transcript cleaner
+        from qualitative.rag_engine import RAGEngine
+        _clean = RAGEngine.clean_transcript_noise
+
         # Collect all text sources
         if concall_texts:
             for t in concall_texts:
                 if isinstance(t, str) and len(t) > 50:
-                    all_texts.append(('concall', t))
+                    all_texts.append(('concall', _clean(t)))
 
         if ar_parsed and isinstance(ar_parsed, dict):
-            sections = ar_parsed.get('sections', {})
-            for section_name, section_text in sections.items():
-                if isinstance(section_text, str) and len(section_text) > 50:
-                    all_texts.append(('annual_report', section_text))
-            # Also raw text if sections are empty
-            raw = ar_parsed.get('raw_text', '')
-            if raw and len(raw) > 100 and not sections:
-                # Chunk large raw text
-                for chunk in self._chunk_text(raw, 3000):
-                    all_texts.append(('annual_report', chunk))
+            # Footnotes — each has 'text' field with actual content
+            for fn in ar_parsed.get('footnotes', []):
+                fn_text = fn.get('text', '')
+                if isinstance(fn_text, str) and len(fn_text) > 50:
+                    all_texts.append(('annual_report', fn_text))
+
+            # Contingent liabilities — raw text string
+            contingent = ar_parsed.get('contingent_liabilities', '')
+            if isinstance(contingent, str) and len(contingent) > 50:
+                all_texts.append(('annual_report', contingent))
+
+            # Related party summary — raw text string
+            rpt_text = ar_parsed.get('related_party_summary', '')
+            if isinstance(rpt_text, str) and len(rpt_text) > 50:
+                all_texts.append(('annual_report', rpt_text))
+
+            # Auditor observations — list of strings
+            for obs in ar_parsed.get('auditor_observations', []):
+                obs_text = obs if isinstance(obs, str) else obs.get('context', '') if isinstance(obs, dict) else ''
+                if isinstance(obs_text, str) and len(obs_text) > 30:
+                    all_texts.append(('annual_report', obs_text))
+
+            # Also raw text if nothing extracted above
+            if not any(src == 'annual_report' for src, _ in all_texts):
+                raw = ar_parsed.get('raw_text', '')
+                if raw and len(raw) > 100:
+                    for chunk in self._chunk_text(raw, 3000):
+                        all_texts.append(('annual_report', chunk))
 
         if announcements:
             for ann in announcements:
@@ -320,12 +342,14 @@ class TextIntelligenceEngine:
                 tone = info.get('sentiment_tone', '')
                 tone_tag = f" [{tone}]" if tone else ""
                 if sents:
-                    insights.append(f"**{topic}**{tone_tag}: {sents[0][:250]}")
+                    snippet = self._smart_truncate(sents[0], 500)
+                    insights.append(f"**{topic}**{tone_tag}: {snippet}")
 
         # Forward-looking highlights
         if forward_looking:
+            snippet = self._smart_truncate(forward_looking[0], 500)
             insights.append(
-                f"**Forward Guidance**: {forward_looking[0][:300]}")
+                f"**Forward Guidance**: {snippet}")
 
         return insights
 
@@ -333,12 +357,24 @@ class TextIntelligenceEngine:
     # Utility
     # ==================================================================
     def _split_sentences(self, text: str) -> list:
-        """Split text into sentences."""
+        """Split text into sentences, respecting abbreviations."""
         # Clean up common noise
         text = re.sub(r'\s+', ' ', text)
         text = re.sub(r'\n{2,}', '. ', text)
+        # Protect common abbreviations & decimals from splitting
+        _PLACEHOLDER = '\u200B'  # zero-width space as safe placeholder
+        text = re.sub(
+            r'(\b(?:Mr|Mrs|Ms|Dr|Sr|Jr|Prof|Inc|Ltd|Co|Corp|vs|etc|Rs|approx))\. ',
+            lambda m: m.group(1) + _PLACEHOLDER + ' ', text)
+        # Protect i.e. and e.g.
+        text = text.replace('i.e. ', 'i.e' + _PLACEHOLDER + ' ')
+        text = text.replace('e.g. ', 'e.g' + _PLACEHOLDER + ' ')
+        # Protect decimals like 0.9 million
+        text = re.sub(r'(\d)\. (\d)', lambda m: m.group(1) + _PLACEHOLDER + ' ' + m.group(2), text)
         # Split on sentence-ending punctuation
         sentences = re.split(r'(?<=[.!?])\s+', text)
+        # Restore protected dots
+        sentences = [s.replace(_PLACEHOLDER, '.') for s in sentences]
         return [s.strip() for s in sentences if len(s.strip()) > 20]
 
     def _chunk_text(self, text: str, chunk_size: int = 3000) -> list:
@@ -363,3 +399,46 @@ class TextIntelligenceEngine:
         # Sort by length (medium-length = most informative)
         filtered.sort(key=lambda s: -min(len(s), 300))
         return filtered[:max_n]
+
+    @staticmethod
+    def _smart_truncate(text: str, max_chars: int = 300) -> str:
+        """Return only *complete* sentences that fit within *max_chars*.
+
+        If no full sentence fits, take the first sentence (even if it
+        exceeds the budget slightly) and append an ellipsis.
+        """
+        import re as _re
+        # Clean transcript noise
+        try:
+            from qualitative.rag_engine import RAGEngine
+            text = RAGEngine.clean_transcript_noise(text)
+        except Exception:
+            pass
+        text = text.strip()
+        if len(text) <= max_chars:
+            return text
+
+        sentences = _re.split(r'(?<=[.!?])\s+', text)
+        result = ''
+        for sent in sentences:
+            candidate = (result + ' ' + sent).strip() if result else sent
+            if len(candidate) <= max_chars:
+                result = candidate
+            else:
+                break
+        if result:
+            return result
+
+        # No complete sentence fits — trim the first sentence
+        first = sentences[0] if sentences else text
+        if len(first) <= max_chars:
+            return first
+        window = first[:max_chars]
+        for delim in ['. ', '; ', ', ']:
+            idx = window.rfind(delim)
+            if idx > max_chars * 0.35:
+                return window[:idx + 1].strip()
+        idx = window.rfind(' ')
+        if idx > 0:
+            return window[:idx].rstrip('.,;:!?') + ' \u2026'
+        return window

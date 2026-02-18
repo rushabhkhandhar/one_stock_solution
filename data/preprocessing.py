@@ -86,6 +86,7 @@ class DataPreprocessor:
         'fixed_assets':      ['FixedAssets'],
         'cwip':              ['CWIP'],
         'investments':       ['Investments'],
+        'cash_equivalents':  ['CashEquivalents'],
         'other_assets':      ['OtherAssets'],
         'total_assets':      ['TotalAssets'],
         # ── Cash Flow ────────────────────────────────────────
