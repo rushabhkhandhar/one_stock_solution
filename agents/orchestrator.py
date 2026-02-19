@@ -39,6 +39,9 @@ from quant.trend_analyzer import TrendAnalyzer
 from quant.technicals import TechnicalAnalyzer
 from quant.sotp import SOTPModel
 from quant.forensic_dashboard import ForensicDashboard
+from quant.tier2_analytics import (
+    DuPontAnalysis, AltmanZScore, WorkingCapitalTrend,
+    HistoricalValuationBand, QuarterlyPerformanceMatrix)
 from predictive.arima_ets import HybridPredictor
 from predictive.flow_correlation import FlowCorrelation
 from predictive.macro_engine import MacroCorrelationEngine
@@ -84,7 +87,12 @@ class Orchestrator:
         self.cross_validator  = CrossValidator()
         self.kill_switch      = KillSwitch()
         self.feeds            = RealtimeFeeds()
-        self.reporter         = ReportGenerator()
+        self.dupont            = DuPontAnalysis()
+        self.altman            = AltmanZScore()
+        self.wcc_trend         = WorkingCapitalTrend()
+        self.hist_valuation    = HistoricalValuationBand()
+        self.qtr_matrix        = QuarterlyPerformanceMatrix()
+        self.reporter          = ReportGenerator()
 
     # ==================================================================
     # Main entry point
@@ -152,6 +160,12 @@ class Orchestrator:
 
         # Shareholding summary
         analysis['shareholding'] = self._summarize_shareholding(data)
+
+        # Quarterly Shareholding Tracker (QoQ institutional flows)
+        analysis['quarterly_shareholding'] = self._summarize_quarterly_shareholding(data)
+
+        # Upcoming Results Calendar
+        analysis['upcoming_results'] = data.get('upcoming_results', [])
 
         # ── Phase 2.5: Annual Report Validation ──────────────
         print("\n📑  PHASE 2.5 — Annual Report Download & Validation")
@@ -285,6 +299,69 @@ class Orchestrator:
         except Exception as e:
             analysis['trends'] = {'available': False, 'reason': str(e)}
 
+        # ── Phase 3.4: Tier 2 Extended Analytics ────────────
+        print("\n📐  PHASE 3.4 — Tier 2 Extended Analytics")
+
+        print("  ▸ DuPont Decomposition …")
+        try:
+            analysis['dupont'] = self.dupont.analyze(data)
+            dp = analysis['dupont']
+            if dp.get('available'):
+                print(f"  ✔ DuPont ROE: {dp.get('roe_dupont')}% "
+                      f"| Weakest: {dp.get('weakest_factor')}")
+            else:
+                print(f"  ⚠ DuPont: {dp.get('reason', 'N/A')}")
+        except Exception as e:
+            analysis['dupont'] = {'available': False, 'reason': str(e)}
+
+        print("  ▸ Altman Z-Score …")
+        try:
+            analysis['altman_z'] = self.altman.calculate(data)
+            az = analysis['altman_z']
+            if az.get('available'):
+                print(f"  ✔ Z-Score: {az.get('z_score')} ({az.get('zone')})")
+            else:
+                print(f"  ⚠ Z-Score: {az.get('reason', 'N/A')}")
+        except Exception as e:
+            analysis['altman_z'] = {'available': False, 'reason': str(e)}
+
+        print("  ▸ Working Capital Cycle Trend …")
+        try:
+            analysis['wcc_trend'] = self.wcc_trend.analyze(data)
+            wc = analysis['wcc_trend']
+            if wc.get('available'):
+                print(f"  ✔ WCC: {wc.get('overall', 'N/A')} "
+                      f"| {len(wc.get('metrics', []))} metrics tracked")
+            else:
+                print(f"  ⚠ WCC: {wc.get('reason', 'N/A')}")
+        except Exception as e:
+            analysis['wcc_trend'] = {'available': False, 'reason': str(e)}
+
+        print("  ▸ Historical Valuation Band …")
+        try:
+            analysis['valuation_band'] = self.hist_valuation.analyze(data)
+            vb = analysis['valuation_band']
+            if vb.get('available'):
+                pe_b = vb.get('pe_band', {})
+                print(f"  ✔ P/E Band: {pe_b.get('min_pe')}x — {pe_b.get('max_pe')}x "
+                      f"(current: {pe_b.get('current_pe')}x)")
+            else:
+                print(f"  ⚠ Valuation Band: {vb.get('reason', 'N/A')}")
+        except Exception as e:
+            analysis['valuation_band'] = {'available': False, 'reason': str(e)}
+
+        print("  ▸ Quarterly Performance Matrix …")
+        try:
+            analysis['qtr_matrix'] = self.qtr_matrix.analyze(data)
+            qm = analysis['qtr_matrix']
+            if qm.get('available'):
+                print(f"  ✔ Quarterly Matrix: {qm.get('num_quarters', 0)} quarters "
+                      f"| Revenue: {qm.get('revenue_momentum', 'N/A')}")
+            else:
+                print(f"  ⚠ Quarterly Matrix: {qm.get('reason', 'N/A')}")
+        except Exception as e:
+            analysis['qtr_matrix'] = {'available': False, 'reason': str(e)}
+
         # ── Phase 3.5: Forensic Extras (RPT, Contingent, Auditor) ────
         print("\n🔬  PHASE 3.5 — Forensic Deep Dive")
         ar_parsed = analysis.get('ar_parsed', {})
@@ -389,6 +466,11 @@ class Orchestrator:
                       f"(segments={_n_full_seg}, SOTP={_sotp_avail})")
             except Exception:
                 pass  # keep original RPT result
+
+        # ── Price Target Reconciliation ──────────────────────
+        print("  ▸ Price Target Reconciliation …")
+        analysis['price_target_recon'] = self._reconcile_price_targets(
+            analysis)
 
         # ── Phase 3.7: Governance Dashboard ──────────────────
         print("\n🏛️  PHASE 3.7 — Corporate Governance")
@@ -522,6 +604,21 @@ class Orchestrator:
             # ── Technical Analysis (new) ──
             if price_hist is not None and len(price_hist) > 30:
                 print("  ▸ Technical Indicators …")
+
+                # Inject delivery % from screener price data into
+                # the yfinance DataFrame so technicals can analyse it
+                screener_price = data.get('price')
+                if (screener_price is not None
+                        and not screener_price.empty
+                        and 'delivery_pct' in screener_price.columns):
+                    # Align by date index and merge
+                    _del = screener_price[['delivery_pct']].copy()
+                    _del.index = pd.to_datetime(_del.index)
+                    _ph_idx = pd.to_datetime(price_hist.index)
+                    price_hist = price_hist.copy()
+                    price_hist.index = _ph_idx
+                    price_hist = price_hist.join(_del, how='left')
+
                 analysis['technicals'] = self.technical.analyze(
                     price_hist, bse_symbol)
                 tech = analysis['technicals']
@@ -764,3 +861,218 @@ class Orchestrator:
             pass
 
         return summary
+
+    # ==================================================================
+    # Quarterly Shareholding Tracker
+    # ==================================================================
+    def _summarize_quarterly_shareholding(self, data: dict) -> dict:
+        """Compute QoQ changes from quarterly shareholding data."""
+        qshp = data.get('quarterly_shareholding', pd.DataFrame())
+        if isinstance(qshp, pd.DataFrame) and qshp.empty:
+            return {'available': False,
+                    'reason': 'No quarterly shareholding data'}
+        if not isinstance(qshp, pd.DataFrame):
+            return {'available': False,
+                    'reason': 'Quarterly shareholding not in DataFrame format'}
+
+        result = {'available': True, 'quarters': [], 'flows': {}}
+
+        # Categories to track
+        cat_map = {
+            'Promoters': ['Promoters'],
+            'FIIs': ['FIIs', 'FII', 'Flls', 'FlIs', 'FPIs'],
+            'DIIs': ['DIIs', 'DII', 'Dils', 'DlIs', 'DIls'],
+            'Public': ['Public'],
+        }
+
+        # Collect quarter dates (column-like index)
+        if hasattr(qshp, 'columns'):
+            result['quarters'] = [str(c) for c in qshp.columns
+                                  if str(c).strip() != '']
+
+        for label, aliases in cat_map.items():
+            col = None
+            for a in aliases:
+                if a in qshp.columns:
+                    col = a
+                    break
+                for c in qshp.columns:
+                    if a.lower() in str(c).lower():
+                        col = c
+                        break
+                if col:
+                    break
+            if not col or col not in qshp.columns:
+                continue
+
+            # qshp is typically categories × quarters
+            # Try both orientations
+            vals = qshp[col].dropna() if col in qshp.columns else pd.Series()
+
+            # If rows are categories, try index-based lookup
+            if vals.empty:
+                for a in aliases:
+                    if a in qshp.index:
+                        vals = qshp.loc[a].dropna()
+                        break
+                    for idx in qshp.index:
+                        if a.lower() in str(idx).lower():
+                            vals = qshp.loc[idx].dropna()
+                            break
+                    if not vals.empty:
+                        break
+
+            if vals.empty or len(vals) < 2:
+                continue
+
+            def _to_pct(v):
+                f = float(v)
+                if f <= 1.0:
+                    f = round(f * 100, 2)
+                return round(f, 2)
+
+            values = [_to_pct(v) for v in vals]
+            qoq_changes = []
+            for i in range(1, len(values)):
+                qoq_changes.append(round(values[i] - values[i - 1], 2))
+
+            result['flows'][label] = {
+                'values': values,
+                'latest': values[-1],
+                'qoq_change': qoq_changes[-1] if qoq_changes else 0,
+                'qoq_changes': qoq_changes,
+                'trend': ('INCREASING' if sum(1 for d in qoq_changes[-3:] if d > 0) >= 2
+                          else 'DECREASING' if sum(1 for d in qoq_changes[-3:] if d < 0) >= 2
+                          else 'STABLE'),
+            }
+
+        if not result['flows']:
+            return {'available': False,
+                    'reason': 'Could not parse quarterly shareholding categories'}
+
+        return result
+
+    # ==================================================================
+    # Price Target Reconciliation
+    # ==================================================================
+    def _reconcile_price_targets(self, analysis: dict) -> dict:
+        """Reconcile DCF, SOTP, and peer-implied fair values."""
+        recon = {'available': False, 'methods': []}
+
+        # 1. DCF-derived target
+        dcf = analysis.get('dcf', {})
+        if (dcf.get('available')
+                and not dcf.get('dcf_ev_mismatch')
+                and dcf.get('intrinsic_value') is not None):
+            recon['methods'].append({
+                'method': 'DCF (Free Cash Flow)',
+                'fair_value': round(dcf['intrinsic_value'], 2),
+                'current_price': round(dcf['current_price'], 2),
+                'upside_pct': round(dcf.get('upside_pct', 0), 1),
+            })
+
+        # 2. SOTP-derived target
+        sotp = analysis.get('sotp', {})
+        if (sotp.get('available')
+                and sotp.get('intrinsic_value') is not None):
+            recon['methods'].append({
+                'method': 'SOTP (Sum-of-Parts)',
+                'fair_value': round(sotp['intrinsic_value'], 2),
+                'current_price': round(sotp['current_price'], 2),
+                'upside_pct': round(sotp.get('upside_pct', 0), 1),
+            })
+
+        # 3. Peer-implied fair value = stock EPS × median peer P/E
+        peer = analysis.get('peer_cca', {})
+        ratios = analysis.get('ratios', {})
+        if (peer.get('available')
+                and peer.get('median_pe') is not None
+                and ratios.get('pe_ratio') is not None):
+            # Derive EPS from current_price / pe_ratio
+            cmp = ratios.get('current_price')
+            pe = ratios.get('pe_ratio')
+            median_pe = peer['median_pe']
+            if cmp and pe and pe > 0 and median_pe > 0:
+                stock_eps = cmp / pe
+                peer_implied = round(stock_eps * median_pe, 2)
+                peer_upside = round((peer_implied / cmp - 1) * 100, 1)
+                recon['methods'].append({
+                    'method': f'Peer CCA (Median P/E {median_pe:.1f}x)',
+                    'fair_value': peer_implied,
+                    'current_price': round(cmp, 2),
+                    'upside_pct': peer_upside,
+                })
+
+        # 4. Peer-implied P/B fair value (critical for banks/NBFCs
+        #    where DCF is skipped)
+        if peer.get('available') and peer.get('median_pb') is not None:
+            cmp = ratios.get('current_price')
+            median_pb = peer['median_pb']
+            _roe = ratios.get('roe')
+            _eps = ratios.get('ttm_eps') or ratios.get('eps')
+            if (cmp and _eps and _eps > 0 and _roe and _roe > 0):
+                bvps = _eps / (_roe / 100)
+                pb_implied = round(bvps * median_pb, 2)
+                if pb_implied > 0:
+                    pb_upside = round((pb_implied / cmp - 1) * 100, 1)
+                    recon['methods'].append({
+                        'method': f'Peer CCA (Median P/B {median_pb:.1f}x)',
+                        'fair_value': pb_implied,
+                        'current_price': round(cmp, 2),
+                        'upside_pct': pb_upside,
+                    })
+
+        # 5. Historical P/E Mean Reversion — uses the stock's OWN
+        #    historical median P/E × current EPS.  Does NOT need peer data.
+        vband = analysis.get('valuation_band', {})
+        pe_band = vband.get('pe_band', {}) if vband.get('available') else {}
+        median_hist_pe = pe_band.get('median_pe')
+        if median_hist_pe and median_hist_pe > 0:
+            cmp = ratios.get('current_price')
+            _eps = ratios.get('ttm_eps') or ratios.get('eps')
+            if cmp and _eps and _eps > 0:
+                hist_pe_fv = round(_eps * median_hist_pe, 2)
+                hist_pe_up = round((hist_pe_fv / cmp - 1) * 100, 1)
+                recon['methods'].append({
+                    'method': f'Historical Median P/E ({median_hist_pe:.1f}x)',
+                    'fair_value': hist_pe_fv,
+                    'current_price': round(cmp, 2),
+                    'upside_pct': hist_pe_up,
+                })
+
+        # 6. Historical P/B Mean Reversion (useful for banks)
+        pb_band = vband.get('pb_band', {}) if vband.get('available') else {}
+        median_hist_pb = pb_band.get('median_pb')
+        if median_hist_pb and median_hist_pb > 0:
+            cmp = ratios.get('current_price')
+            _eps = ratios.get('ttm_eps') or ratios.get('eps')
+            _roe = ratios.get('roe')
+            if cmp and _eps and _eps > 0 and _roe and _roe > 0:
+                bvps = _eps / (_roe / 100)
+                hist_pb_fv = round(bvps * median_hist_pb, 2)
+                if hist_pb_fv > 0:
+                    hist_pb_up = round((hist_pb_fv / cmp - 1) * 100, 1)
+                    recon['methods'].append({
+                        'method': f'Historical Median P/B ({median_hist_pb:.1f}x)',
+                        'fair_value': hist_pb_fv,
+                        'current_price': round(cmp, 2),
+                        'upside_pct': hist_pb_up,
+                    })
+
+        if recon['methods']:
+            recon['available'] = True
+            fair_values = [m['fair_value'] for m in recon['methods']]
+            recon['avg_fair_value'] = round(sum(fair_values) / len(fair_values), 2)
+            recon['min_fair_value'] = round(min(fair_values), 2)
+            recon['max_fair_value'] = round(max(fair_values), 2)
+            cmp = recon['methods'][0]['current_price']
+            recon['avg_upside_pct'] = round(
+                (recon['avg_fair_value'] / cmp - 1) * 100, 1)
+            print(f"  ✔ Reconciled {len(recon['methods'])} valuation methods "
+                  f"→ avg fair value ₹{recon['avg_fair_value']:,.2f} "
+                  f"({recon['avg_upside_pct']:+.1f}%)")
+        else:
+            recon['reason'] = 'No valuation methods produced fair values'
+            print("  ⚠ No valuation methods available for reconciliation")
+
+        return recon

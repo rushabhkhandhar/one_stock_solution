@@ -74,6 +74,9 @@ class TechnicalAnalyzer:
         volume = df['volume'].astype(float) if 'volume' in df.columns else pd.Series(
             0, index=close.index, dtype=float)
 
+        delivery = (df['delivery_pct'].astype(float)
+                    if 'delivery_pct' in df.columns else None)
+
         result = {'available': True, 'symbol': symbol}
 
         # ── Trend Analysis ───────────────────────────────────
@@ -84,6 +87,15 @@ class TechnicalAnalyzer:
 
         # ── Volume Analysis ──────────────────────────────────
         result['volume_analysis'] = self._volume_analysis(close, volume)
+
+        # ── Delivery Volume Analysis ────────────────────────
+        if delivery is not None:
+            result['delivery_analysis'] = self._delivery_analysis(
+                close, volume, delivery)
+        else:
+            result['delivery_analysis'] = {
+                'available': False,
+                'reason': 'Delivery % data not available in price feed'}
 
         # ── Volatility ───────────────────────────────────────
         result['volatility'] = self._volatility_analysis(close, high, low, has_ohlc)
@@ -287,6 +299,95 @@ class TechnicalAnalyzer:
         return vol
 
     # ==================================================================
+    # Delivery Volume Analysis
+    # ==================================================================
+    def _delivery_analysis(self, close: pd.Series,
+                           volume: pd.Series,
+                           delivery_pct: pd.Series) -> dict:
+        """Analyse delivery volume % for smart-money signals."""
+        # Drop NaN delivery rows
+        valid = delivery_pct.dropna()
+        if len(valid) < 20:
+            return {'available': False,
+                    'reason': 'Insufficient delivery data (need ≥ 20 bars)'}
+
+        da = {'available': True}
+        latest_del = float(valid.iloc[-1])
+        da['latest_delivery_pct'] = round(latest_del, 1)
+
+        # Averages
+        avg_20 = float(valid.tail(20).mean())
+        da['avg_delivery_20d'] = round(avg_20, 1)
+
+        if len(valid) >= 50:
+            avg_50 = float(valid.tail(50).mean())
+            da['avg_delivery_50d'] = round(avg_50, 1)
+
+        if len(valid) >= 200:
+            avg_200 = float(valid.tail(200).mean())
+            da['avg_delivery_200d'] = round(avg_200, 1)
+
+        # Delivery trend: is 20d avg above or below 50d avg?
+        if len(valid) >= 50:
+            da['delivery_trend'] = ('RISING' if avg_20 > avg_50 * 1.05
+                                    else ('FALLING' if avg_20 < avg_50 * 0.95
+                                          else 'STABLE'))
+        else:
+            da['delivery_trend'] = 'N/A'
+
+        # Smart money signal:
+        # High delivery % + rising price = institutional accumulation
+        # High delivery % + falling price = institutional distribution
+        # Low delivery % + rising price = speculative rally (weak)
+        if len(close) >= 20 and len(valid) >= 20:
+            price_chg_20d = (close.iloc[-1] / close.iloc[-20] - 1) * 100
+            high_delivery = avg_20 > 50  # >50% is considered high
+            low_delivery = avg_20 < 30   # <30% is considered low
+
+            if high_delivery and price_chg_20d > 2:
+                da['smart_money_signal'] = 'ACCUMULATION'
+                da['smart_money_detail'] = (
+                    f'🟢 High delivery ({avg_20:.1f}%) with price rising '
+                    f'{price_chg_20d:+.1f}% — institutional accumulation likely')
+            elif high_delivery and price_chg_20d < -2:
+                da['smart_money_signal'] = 'DISTRIBUTION'
+                da['smart_money_detail'] = (
+                    f'🔴 High delivery ({avg_20:.1f}%) with price falling '
+                    f'{price_chg_20d:+.1f}% — institutional distribution likely')
+            elif low_delivery and price_chg_20d > 5:
+                da['smart_money_signal'] = 'SPECULATIVE_RALLY'
+                da['smart_money_detail'] = (
+                    f'⚠️ Low delivery ({avg_20:.1f}%) with price surge '
+                    f'{price_chg_20d:+.1f}% — speculative/trader-driven, '
+                    f'rally may lack conviction')
+            elif low_delivery and price_chg_20d < -5:
+                da['smart_money_signal'] = 'PANIC_SELLING'
+                da['smart_money_detail'] = (
+                    f'⚠️ Low delivery ({avg_20:.1f}%) with sharp fall '
+                    f'{price_chg_20d:+.1f}% — panic/stop-loss driven '
+                    f'selling, not institutional exit')
+            else:
+                da['smart_money_signal'] = 'NEUTRAL'
+                da['smart_money_detail'] = (
+                    f'Delivery {avg_20:.1f}% with price change '
+                    f'{price_chg_20d:+.1f}% — no clear smart money signal')
+
+            da['price_change_20d'] = round(price_chg_20d, 2)
+
+        # Delivery spike detection (latest vs 20d avg)
+        if avg_20 > 0:
+            da['relative_delivery'] = round(latest_del / avg_20, 2)
+            if latest_del > avg_20 * 1.5:
+                da['delivery_spike'] = True
+                da['delivery_spike_detail'] = (
+                    f'Delivery spike: {latest_del:.1f}% vs '
+                    f'{avg_20:.1f}% avg — unusual institutional activity')
+            else:
+                da['delivery_spike'] = False
+
+        return da
+
+    # ==================================================================
     # Volatility
     # ==================================================================
     def _volatility_analysis(self, close: pd.Series,
@@ -404,6 +505,20 @@ class TechnicalAnalyzer:
         elif div == 'BEARISH_DIVERGENCE':
             bear_signals += 1
             total_signals += 1
+
+        # Delivery volume signals
+        delivery = result.get('delivery_analysis', {})
+        if delivery.get('available'):
+            smart = delivery.get('smart_money_signal')
+            if smart == 'ACCUMULATION':
+                bull_signals += 1
+                total_signals += 1
+            elif smart == 'DISTRIBUTION':
+                bear_signals += 1
+                total_signals += 1
+            elif smart == 'SPECULATIVE_RALLY':
+                bear_signals += 1    # speculative rallies are bearish warning
+                total_signals += 1
 
         # Composite
         if total_signals == 0:

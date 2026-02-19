@@ -161,6 +161,19 @@ class FinancialRatios:
             r['pe_ratio']      = round(cmp / pe_eps, 2)
             r['pe_eps_used']   = 'TTM' if ttm_eps is not None and ttm_eps > 0 else 'Annual'
 
+            # PEG Ratio = P/E ÷ Earnings Growth Rate
+            # Use profit_growth (YoY) first; fall back to revenue_cagr_3y
+            _peg_growth = r.get('profit_growth')
+            if _peg_growth is None or _peg_growth == 0:
+                _peg_growth = r.get('revenue_cagr_3y')
+            if (_peg_growth is not None
+                    and isinstance(_peg_growth, (int, float))
+                    and _peg_growth > 0):
+                r['peg_ratio'] = round(r['pe_ratio'] / _peg_growth, 2)
+                r['peg_growth_used'] = ('Profit Growth YoY'
+                                        if r.get('profit_growth') and r['profit_growth'] > 0
+                                        else 'Revenue CAGR 3Y')
+
             # Dividend yield
             if not np.isnan(div_dec) and div_dec > 0:
                 dps = eps * div_dec     # div_dec is already decimal

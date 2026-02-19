@@ -64,11 +64,11 @@ class DataPreprocessor:
 
     FIELD_MAP = {
         # ── P&L ──────────────────────────────────────────────
-        'sales':             ['Sales'],
+        'sales':             ['Sales', 'Revenue'],
         'expenses':          ['Expenses'],
-        'operating_profit':  ['OperatingProfit'],
-        'opm':               ['OPM%'],
-        'other_income':      ['OtherIncome'],
+        'operating_profit':  ['OperatingProfit', 'FinancingProfit'],
+        'opm':               ['OPM%', 'FinancingMargin%'],
+        'other_income':      ['OtherIncome', 'Otherincomenormal'],
         'interest':          ['Interest'],
         'depreciation':      ['Depreciation'],
         'pbt':               ['Profitbeforetax'],
@@ -80,7 +80,8 @@ class DataPreprocessor:
         # ── Balance Sheet ────────────────────────────────────
         'equity_capital':    ['EquityCapital'],
         'reserves':          ['Reserves'],
-        'borrowings':        ['Borrowings'],
+        'borrowings':        ['Borrowings', 'Borrowing'],
+        'deposits':          ['Deposits'],
         'other_liabilities': ['OtherLiabilities'],
         'total_liabilities': ['TotalLiabilities'],
         'fixed_assets':      ['FixedAssets'],

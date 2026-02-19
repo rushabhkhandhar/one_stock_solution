@@ -89,6 +89,8 @@ class ReportGenerator:
         trends = analysis.get('trends', {})
         tech   = analysis.get('technicals', {})
         text_intel = analysis.get('text_intel', {})
+        # Tier 1 features
+        qshp   = analysis.get('quarterly_shareholding', {})
 
         lines = []
         a = lines.append
@@ -143,6 +145,7 @@ class ReportGenerator:
         METRICS = [
             ('Current Price',         'current_price',   '₹{:,.2f}'),
             ('P/E Ratio (TTM)',       'pe_ratio',        '{:.2f}x'),
+            ('PEG Ratio',             'peg_ratio',       '{:.2f}'),
             ('EPS (Annual)',          'eps',             '₹{:.2f}'),
             ('EPS (TTM)',             'ttm_eps',         '₹{:.2f}'),
             ('ROE',                   'roe',             '{:.2f} %'),
@@ -180,6 +183,20 @@ class ReportGenerator:
         # Show EPS corporate-action adjustment note if detected
         if ratios.get('eps_adjusted'):
             a(f"> ℹ️ **EPS Adjusted:** {ratios.get('eps_adjustment_reason', 'Corporate action detected.')}\n")
+
+        # PEG ratio interpretation
+        peg = ratios.get('peg_ratio')
+        if peg is not None:
+            peg_growth_used = ratios.get('peg_growth_used', 'Earnings Growth')
+            if peg < 1:
+                a(f"> 📊 **PEG Ratio {peg:.2f}** (using {peg_growth_used}) — "
+                  f"Stock appears undervalued relative to its growth rate.\n")
+            elif peg > 2:
+                a(f"> 📊 **PEG Ratio {peg:.2f}** (using {peg_growth_used}) — "
+                  f"Stock appears overvalued relative to its growth rate.\n")
+            else:
+                a(f"> 📊 **PEG Ratio {peg:.2f}** (using {peg_growth_used}) — "
+                  f"Fairly valued relative to growth.\n")
 
         # ── 5-Year Trend Analysis (NEW) ─────────────────────
         if trends.get('available'):
@@ -325,6 +342,250 @@ class ReportGenerator:
                       f"multiple quarters, it may signal competitive "
                       f"pressure or demand softening rather than a "
                       f"temporary blip.*\n")
+
+        # ── Tier 2: DuPont Decomposition ────────────────────
+        dupont = analysis.get('dupont', {})
+        if dupont.get('available'):
+            a("## 🔬 DuPont Decomposition (5-Factor ROE Breakdown)\n")
+            a("| Factor | Value | Interpretation |")
+            a("|--------|------:|:---------------|")
+            factor_labels = {
+                'tax_burden': ('Tax Burden', 'Net Income / PBT — higher = less tax drag'),
+                'interest_burden': ('Interest Burden', 'PBT / EBIT — higher = less interest cost'),
+                'ebit_margin': ('EBIT Margin', 'EBIT / Revenue — core operating efficiency'),
+                'asset_turnover': ('Asset Turnover', 'Revenue / Total Assets — asset utilisation'),
+                'equity_multiplier': ('Equity Multiplier', 'Total Assets / Equity — leverage'),
+            }
+            for key, (label, interp) in factor_labels.items():
+                val = dupont.get(key)
+                if val is not None:
+                    a(f"| {label} | {val:.3f} | {interp} |")
+            a("")
+            roe_dp = dupont.get('roe_dupont')
+            if roe_dp is not None:
+                a(f"**Computed ROE (DuPont):** {roe_dp:.2f}%\n")
+            weakest = dupont.get('weakest_factor')
+            strongest = dupont.get('strongest_factor')
+            if weakest:
+                a(f"> ⚠️ **Weakest Factor:** {weakest} — this is the primary "
+                  f"drag on ROE and the area management should prioritise.\n")
+            if strongest:
+                a(f"> ✅ **Strongest Factor:** {strongest} — competitive "
+                  f"advantage embedded here.\n")
+
+            history = dupont.get('history', [])
+            if history:
+                a("### DuPont Factor History\n")
+                a("| Year | Tax Burden | Interest Burden | EBIT Margin | Asset T/O | Eq. Multiplier | ROE |")
+                a("|------|----------:|----------------:|------------:|----------:|---------------:|----:|")
+                for h in history:
+                    a(f"| {h.get('year', '')} "
+                      f"| {h.get('tax_burden', 0):.3f} "
+                      f"| {h.get('interest_burden', 0):.3f} "
+                      f"| {h.get('ebit_margin', 0):.3f} "
+                      f"| {h.get('asset_turnover', 0):.3f} "
+                      f"| {h.get('equity_multiplier', 0):.3f} "
+                      f"| {h.get('roe', 0):.2f}% |")
+                a("")
+
+        # ── Tier 2: Altman Z-Score ───────────────────────────
+        altman = analysis.get('altman_z', {})
+        if altman.get('available'):
+            a("## ⚠️ Altman Z-Score — Bankruptcy Risk Assessment\n")
+            z_val = altman.get('z_score')
+            zone = altman.get('zone', '')
+            zone_icon = {'Safe': '🟢', 'Grey': '🟡', 'Distress': '🔴'}.get(zone, '⚪')
+            a(f"**{zone_icon} Z-Score: {z_val:.2f}** — **{zone} Zone**\n")
+            interp = altman.get('interpretation', '')
+            if interp:
+                a(f"> {interp}\n")
+
+            components = altman.get('components', {})
+            weighted = altman.get('weighted', {})
+            if components:
+                a("| Component | Raw Value | Weight | Weighted |")
+                a("|-----------|----------:|-------:|---------:|")
+                comp_labels = {
+                    'wc_ta': ('Working Capital / Total Assets', 1.2),
+                    're_ta': ('Retained Earnings / Total Assets', 1.4),
+                    'ebit_ta': ('EBIT / Total Assets', 3.3),
+                    'mcap_tl': ('Market Cap / Total Liabilities', 0.6),
+                    'sales_ta': ('Sales / Total Assets', 1.0),
+                }
+                for key, (label, wt) in comp_labels.items():
+                    raw = components.get(key)
+                    w = weighted.get(key)
+                    if raw is not None and w is not None:
+                        a(f"| {label} | {raw:.4f} | {wt:.1f} | {w:.4f} |")
+                a("")
+
+            a("> 📌 *Z > 2.99 = Safe | 1.81 – 2.99 = Grey Zone | Z < 1.81 = Distress. "
+              "Original Altman (1968) model for manufacturing firms; "
+              "interpret with caution for financial-sector or asset-light companies.*\n")
+        elif altman.get('sector_skip'):
+            a("## ⚠️ Altman Z-Score — Bankruptcy Risk Assessment\n")
+            a(f"> ℹ️ **Altman Z-Score Skipped** — {altman.get('reason', 'Not applicable for this sector.')}\n")
+            a("> 💡 *For banks, NBFCs, and insurance companies, the Altman Z-Score "
+              "is structurally inapplicable because deposits and float are "
+              "operational liabilities, not financial distress indicators. "
+              "Use CAMEL ratings, NPA ratios, or Capital Adequacy (CAR) "
+              "for bank-specific risk assessment.*\n")
+
+        # ── Tier 2: Working Capital Cycle Trend ──────────────
+        wcc = analysis.get('wcc_trend', {})
+        if wcc.get('available'):
+            a("## 🔄 Working Capital Cycle — Multi-Year Trend\n")
+            overall = wcc.get('overall', 'N/A')
+            ov_icon = {'IMPROVING': '🟢', 'STABLE': '🟡',
+                       'WORSENING': '🔴'}.get(overall, '⚪')
+            a(f"**{ov_icon} Overall Trend: {overall}**\n")
+
+            wcc_metrics = wcc.get('metrics', [])
+            if wcc_metrics:
+                a("| Metric | Latest (days) | Previous (days) | YoY Change | Trend |")
+                a("|--------|-------------:|-----------------:|-----------:|:-----:|")
+                for m in wcc_metrics:
+                    latest = m.get('latest')
+                    prev = m.get('previous')
+                    yoy = m.get('yoy_change')
+                    trend = m.get('trend', '')
+                    t_icon = {'IMPROVING': '🟢', 'STABLE': '🟡',
+                              'WORSENING': '🔴'}.get(trend, '⚪')
+                    lat_s = f"{latest:.1f}" if latest is not None else 'N/A'
+                    prv_s = f"{prev:.1f}" if prev is not None else 'N/A'
+                    yoy_s = f"{yoy:+.1f}" if yoy is not None else 'N/A'
+                    a(f"| {m.get('label', '')} | {lat_s} | {prv_s} | {yoy_s} | {t_icon} {trend} |")
+                a("")
+
+                # History sub-tables for each metric
+                for m in wcc_metrics:
+                    hist = m.get('history', [])
+                    if hist and len(hist) > 2:
+                        a(f"**{m.get('label', '')} — History:**\n")
+                        a("| " + " | ".join(str(h.get('year', '')) for h in hist) + " |")
+                        a("| " + " | ".join("---:" for _ in hist) + " |")
+                        a("| " + " | ".join(
+                            f"{h.get('value', 0):.1f}" for h in hist) + " |")
+                        a("")
+        elif wcc.get('sector_skip'):
+            a("## 🔄 Working Capital Cycle — Multi-Year Trend\n")
+            a(f"> ℹ️ **Working Capital Cycle Skipped** — "
+              f"{wcc.get('reason', 'Not applicable for this sector.')}\n")
+            a("> 💡 *For banks, NBFCs, and insurance companies, traditional "
+              "working capital metrics (Inventory Days, Debtor Days, "
+              "Creditor Days, Cash Conversion Cycle) are not applicable. "
+              "Use NPA ratios, CASA ratio, and Net Interest Margin (NIM) "
+              "for operational efficiency assessment.*\n")
+
+        # ── Tier 2: Historical Valuation Band ────────────────
+        vband = analysis.get('valuation_band', {})
+        if vband.get('available'):
+            a("## 📊 Historical Valuation Band\n")
+
+            pe_band = vband.get('pe_band', {})
+            if pe_band:
+                a("### P/E Valuation Band\n")
+                a("| Statistic | Value |")
+                a("|-----------|------:|")
+                for stat_key, stat_label in [
+                    ('min_pe', 'Minimum P/E'),
+                    ('max_pe', 'Maximum P/E'),
+                    ('median_pe', 'Median P/E'),
+                    ('avg_pe', 'Average P/E'),
+                    ('current_pe', 'Current P/E'),
+                ]:
+                    v = pe_band.get(stat_key)
+                    if v is not None:
+                        a(f"| {stat_label} | {v:.2f}x |")
+                a("")
+
+                pe_hist = pe_band.get('history', [])
+                if pe_hist:
+                    a("| Year | EPS | Price | P/E |")
+                    a("|------|----:|------:|----:|")
+                    for h in pe_hist:
+                        a(f"| {h.get('year', '')} "
+                          f"| ₹{h.get('eps', 0):.2f} "
+                          f"| ₹{h.get('avg_price', 0):,.0f} "
+                          f"| {h.get('pe', 0):.2f}x |")
+                    a("")
+
+            pb_band = vband.get('pb_band', {})
+            if pb_band:
+                a("### P/B Valuation Band\n")
+                a("| Statistic | Value |")
+                a("|-----------|------:|")
+                for stat_key, stat_label in [
+                    ('min_pb', 'Minimum P/B'),
+                    ('max_pb', 'Maximum P/B'),
+                    ('median_pb', 'Median P/B'),
+                    ('avg_pb', 'Average P/B'),
+                    ('current_pb', 'Current P/B'),
+                ]:
+                    v = pb_band.get(stat_key)
+                    if v is not None:
+                        a(f"| {stat_label} | {v:.2f}x |")
+                a("")
+
+                pb_hist = pb_band.get('history', [])
+                if pb_hist:
+                    a("| Year | BVPS | Price | P/B |")
+                    a("|------|-----:|------:|----:|")
+                    for h in pb_hist:
+                        a(f"| {h.get('year', '')} "
+                          f"| ₹{h.get('bvps', 0):.2f} "
+                          f"| ₹{h.get('avg_price', 0):,.0f} "
+                          f"| {h.get('pb', 0):.2f}x |")
+                    a("")
+
+            pe_pct = vband.get('pe_percentile')
+            pe_zone = vband.get('pe_zone', '')
+            if pe_pct is not None:
+                zone_icon = {'UNDERVALUED': '🟢', 'FAIRLY_VALUED': '🟡',
+                             'OVERVALUED': '🔴'}.get(pe_zone, '⚪')
+                a(f"> {zone_icon} Current P/E is at the **{pe_pct:.0f}th percentile** "
+                  f"of its historical range — **{pe_zone.replace('_', ' ')}**\n")
+
+        # ── Tier 2: Quarterly Performance Matrix ─────────────
+        qmat = analysis.get('qtr_matrix', {})
+        if qmat.get('available'):
+            a("## 📅 Quarterly Performance Matrix\n")
+
+            quarters = qmat.get('quarters', [])
+            if quarters:
+                a("| Quarter | Revenue (Cr) | Net Profit (Cr) | OPM % "
+                  "| Rev QoQ | Rev YoY | Profit QoQ | Profit YoY |")
+                a("|---------|-------------:|----------------:|------:"
+                  "|--------:|--------:|-----------:|-----------:|")
+                for q in quarters:
+                    rev = q.get('revenue')
+                    np_ = q.get('net_profit')
+                    opm = q.get('opm')
+                    rqoq = q.get('revenue_qoq')
+                    ryoy = q.get('revenue_yoy')
+                    pqoq = q.get('profit_qoq')
+                    pyoy = q.get('profit_yoy')
+                    rev_s = f"₹{rev:,.0f}" if rev is not None else 'N/A'
+                    np_s = f"₹{np_:,.0f}" if np_ is not None else 'N/A'
+                    opm_s = f"{opm:.1f}%" if opm is not None else 'N/A'
+                    rqoq_s = f"{rqoq:+.1f}%" if rqoq is not None else '—'
+                    ryoy_s = f"{ryoy:+.1f}%" if ryoy is not None else '—'
+                    pqoq_s = f"{pqoq:+.1f}%" if pqoq is not None else '—'
+                    pyoy_s = f"{pyoy:+.1f}%" if pyoy is not None else '—'
+                    a(f"| {q.get('quarter', '')} | {rev_s} | {np_s} | {opm_s} "
+                      f"| {rqoq_s} | {ryoy_s} | {pqoq_s} | {pyoy_s} |")
+                a("")
+
+            rev_mom = qmat.get('revenue_momentum', '')
+            margin_tr = qmat.get('margin_trend', '')
+            if rev_mom:
+                mom_icon = {'ACCELERATING': '🟢', 'DECELERATING': '🔴',
+                            'STABLE': '🟡'}.get(rev_mom, '⚪')
+                a(f"> {mom_icon} **Revenue Momentum:** {rev_mom}\n")
+            if margin_tr:
+                mtr_icon = {'EXPANDING': '🟢', 'CONTRACTING': '🔴',
+                            'STABLE': '🟡'}.get(margin_tr, '⚪')
+                a(f"> {mtr_icon} **Margin Trend:** {margin_tr}\n")
 
         # ── DCF Valuation ────────────────────────────────────
         a("## 💰 Valuation Analysis — DCF Model\n")
@@ -526,6 +787,49 @@ class ReportGenerator:
 
             a("> 💡 *SOTP is most useful for conglomerates with diverse business "
               "segments. Discount reflects limited market for controlling stake.*\n")
+
+        # ── Price Target Reconciliation ──────────────────────
+        recon = analysis.get('price_target_recon', {})
+        if recon.get('available') and recon.get('methods'):
+            a("## 🎯 Price Target Reconciliation\n")
+            a("| Valuation Method | Fair Value | Upside/Downside |")
+            a("|------------------|----------:|:---------:|")
+            for m in recon['methods']:
+                up = m.get('upside_pct', 0)
+                icon = '🟢' if up > 10 else ('🟡' if up > -10 else '🔴')
+                a(f"| {m['method']} | ₹{m['fair_value']:,.2f} | "
+                  f"{icon} {up:+.1f}% |")
+            a("")
+            a(f"| **Consensus (Average)** | "
+              f"**₹{recon['avg_fair_value']:,.2f}** | "
+              f"**{recon['avg_upside_pct']:+.1f}%** |")
+            a(f"| Range | ₹{recon['min_fair_value']:,.2f} — "
+              f"₹{recon['max_fair_value']:,.2f} | — |")
+            a("")
+            if len(recon['methods']) >= 2:
+                spread = recon['max_fair_value'] - recon['min_fair_value']
+                avg = recon['avg_fair_value']
+                if avg > 0:
+                    spread_pct = round(spread / avg * 100, 1)
+                    if spread_pct > 50:
+                        a(f"> ⚠️ *High valuation spread ({spread_pct:.1f}%) — "
+                          f"methods disagree significantly. Apply wider "
+                          f"margin of safety.*\n")
+                    elif spread_pct < 15:
+                        a(f"> ✅ *Tight valuation convergence ({spread_pct:.1f}%) "
+                          f"— methods broadly agree on fair value.*\n")
+                    else:
+                        a(f"> 📊 *Moderate valuation spread ({spread_pct:.1f}%) "
+                          f"— consider the method most relevant to the "
+                          f"company's stage and sector.*\n")
+        elif recon.get('reason'):
+            a("## 🎯 Price Target Reconciliation\n")
+            a(f"> ⚠️ **Reconciliation Unavailable** — "
+              f"{recon['reason']}\n")
+            a("> 💡 *This may occur when DCF is skipped for financial-sector "
+              "companies and peer comparable data is temporarily unavailable. "
+              "Refer to the Historical Valuation Band section above for "
+              "an alternative fair-value reference.*\n")
 
         # ── CFO / EBITDA Quality ─────────────────────────────
         cfo = analysis.get('cfo_ebitda_check', {})
@@ -736,6 +1040,67 @@ class ReportGenerator:
                       "downward price pressure in a self-reinforcing "
                       "cycle. Monitor pledge levels quarterly.*\n")
                 a("")
+
+        # ── Quarterly Shareholding Tracker ────────────────────
+        qshp = analysis.get('quarterly_shareholding', {})
+        if qshp.get('available') and qshp.get('flows'):
+            a("## 📊 Institutional Flow Tracker (Quarterly SHP)\n")
+            a("| Category | Latest (%) | QoQ Δ | Trend |")
+            a("|----------|----------:|---------:|:-----:|")
+            for cat, flow_data in qshp['flows'].items():
+                cat_display = (cat.replace('Flls', 'FIIs')
+                                  .replace('Dils', 'DIIs')
+                                  .replace('FlIs', 'FIIs')
+                                  .replace('DlIs', 'DIIs'))
+                latest = flow_data.get('latest', 'N/A')
+                qoq = flow_data.get('qoq_change', 0)
+                trend = flow_data.get('trend', 'N/A')
+                trend_icon = {'INCREASING': '🟢', 'DECREASING': '🔴',
+                              'STABLE': '🟡'}.get(trend, '⚪')
+                a(f"| {cat_display} | {latest} | {qoq:+.2f} | "
+                  f"{trend_icon} {trend} |")
+            a("")
+
+            # QoQ detail table (if multiple quarters available)
+            quarters = qshp.get('quarters', [])
+            if len(quarters) >= 2:
+                # Show last 4-6 quarters
+                display_qtrs = quarters[-6:] if len(quarters) > 6 else quarters
+                hdr = "| Category | " + " | ".join(str(q)[:7] for q in display_qtrs) + " |"
+                sep = "|----------|" + "|".join("------:" for _ in display_qtrs) + "|"
+                a("### Quarter-by-Quarter Breakdown\n")
+                a(hdr)
+                a(sep)
+                for cat, flow_data in qshp['flows'].items():
+                    cat_display = (cat.replace('Flls', 'FIIs')
+                                      .replace('Dils', 'DIIs')
+                                      .replace('FlIs', 'FIIs')
+                                      .replace('DlIs', 'DIIs'))
+                    vals = flow_data.get('values', [])
+                    # Align to the displayed quarters
+                    display_vals = vals[-len(display_qtrs):] if len(vals) >= len(display_qtrs) else vals
+                    cells = [f"{v:.1f}" for v in display_vals]
+                    a(f"| {cat_display} | " + " | ".join(cells) + " |")
+                a("")
+
+            # Smart money flow alert
+            fii_flow = qshp['flows'].get('FIIs', {})
+            dii_flow = qshp['flows'].get('DIIs', {})
+            if fii_flow and dii_flow:
+                fii_qoq = fii_flow.get('qoq_change', 0)
+                dii_qoq = dii_flow.get('qoq_change', 0)
+                if fii_qoq > 0.5 and dii_qoq > 0.5:
+                    a("> 🟢 **Both FII and DII increasing stakes** — "
+                      "strong institutional conviction.\n")
+                elif fii_qoq < -0.5 and dii_qoq < -0.5:
+                    a("> 🔴 **Both FII and DII reducing stakes** — "
+                      "institutional exit signal.\n")
+                elif fii_qoq > 0.5 and dii_qoq < -0.5:
+                    a("> 🟡 **FII buying while DII selling** — "
+                      "foreign capital inflow, domestic rotation out.\n")
+                elif fii_qoq < -0.5 and dii_qoq > 0.5:
+                    a("> 🟡 **DII buying while FII selling** — "
+                      "domestic institutions absorbing FII selling.\n")
 
         # ── Forensic Deep Dive (RPT, Contingent, Auditor) ────
         rpt = analysis.get('rpt', {})
@@ -1359,6 +1724,37 @@ class ReportGenerator:
                 if div_sig and vol.get('divergence', 'NONE') != 'NONE':
                     a(f"> {div_sig}\n")
 
+            # Delivery Volume Analysis
+            delivery = tech.get('delivery_analysis', {})
+            if delivery.get('available'):
+                a("### 📦 Delivery Volume Analysis\n")
+                a("| Metric | Value |")
+                a("|--------|------:|")
+                if delivery.get('latest_delivery_pct') is not None:
+                    a(f"| Latest Delivery % | {delivery['latest_delivery_pct']:.1f}% |")
+                if delivery.get('avg_delivery_20d') is not None:
+                    a(f"| 20-Day Avg Delivery % | {delivery['avg_delivery_20d']:.1f}% |")
+                if delivery.get('avg_delivery_50d') is not None:
+                    a(f"| 50-Day Avg Delivery % | {delivery['avg_delivery_50d']:.1f}% |")
+                if delivery.get('avg_delivery_200d') is not None:
+                    a(f"| 200-Day Avg Delivery % | {delivery['avg_delivery_200d']:.1f}% |")
+                if delivery.get('delivery_trend'):
+                    trend_icon = {'RISING': '🟢', 'FALLING': '🔴',
+                                  'STABLE': '🟡'}.get(delivery['delivery_trend'], '⚪')
+                    a(f"| Delivery Trend | {trend_icon} {delivery['delivery_trend']} |")
+                if delivery.get('relative_delivery') is not None:
+                    a(f"| Relative Delivery | {delivery['relative_delivery']:.2f}x |")
+                a("")
+
+                # Smart money signal
+                smart_detail = delivery.get('smart_money_detail')
+                if smart_detail:
+                    a(f"> {smart_detail}\n")
+
+                # Delivery spike
+                if delivery.get('delivery_spike'):
+                    a(f"> 🔥 {delivery.get('delivery_spike_detail', 'Delivery spike detected')}\n")
+
             # Volatility
             volatility = tech.get('volatility', {})
             if volatility.get('available'):
@@ -1587,6 +1983,37 @@ class ReportGenerator:
         elif validation and validation.get('reason'):
             a("## 📋 Data Validation\n")
             a(f"> ⏭️ Validation skipped — {validation['reason']}\n")
+
+        # ── Upcoming Results Calendar ─────────────────────────
+        upcoming = analysis.get('upcoming_results', [])
+        if upcoming:
+            a("## 📅 Upcoming Results Calendar\n")
+            a("| Detail | Value |")
+            a("|--------|-------|")
+            for entry in upcoming:
+                # BSE Corpforthresults API returns:
+                #   scrip_Code, short_name, Long_Name, meeting_date, URL
+                if isinstance(entry, dict):
+                    company = (entry.get('Long_Name')
+                               or entry.get('short_name', ''))
+                    meeting = (entry.get('meeting_date')
+                               or entry.get('DT_TM', ''))
+                    if company:
+                        a(f"| Company | {company} |")
+                    if meeting:
+                        a(f"| Board Meeting Date | {meeting} |")
+                    url = entry.get('URL', '')
+                    if url:
+                        a(f"| BSE Filing | [Link]({url}) |")
+            a("")
+            a("> 📌 *Dates sourced from BSE India filings. "
+              "Subject to change per company announcements.*\n")
+        else:
+            a("## 📅 Upcoming Results Calendar\n")
+            a("> ℹ️ No upcoming board meetings / results dates found in "
+              "BSE India filings for this company at the time of report "
+              "generation. This typically means the next result date has "
+              "not yet been announced by the company.\n")
 
         # ── Risks ────────────────────────────────────────────
         a("## ⚠️ Risk Factors & Red Flags\n")

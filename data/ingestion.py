@@ -165,11 +165,18 @@ class DataIngestion:
                     df['close'] = pd.to_numeric(df['close'], errors='coerce')
                     df = df.set_index('date')
 
-                    # Attach volume if available
+                    # Attach volume + delivery % if available
                     if volume_ds and 'values' in volume_ds:
                         vol_rows = []
                         for row in volume_ds['values']:
-                            vol_rows.append({'date': row[0], 'volume': row[1]})
+                            entry = {'date': row[0], 'volume': row[1]}
+                            # Extract delivery % from 3rd element if present
+                            # Format: [date, volume_count, {'delivery': 39}]
+                            if (len(row) >= 3
+                                    and isinstance(row[2], dict)
+                                    and 'delivery' in row[2]):
+                                entry['delivery_pct'] = row[2]['delivery']
+                            vol_rows.append(entry)
                         vdf = pd.DataFrame(vol_rows)
                         vdf['date'] = pd.to_datetime(vdf['date'])
                         vdf = vdf.set_index('date')
@@ -367,6 +374,13 @@ class DataIngestion:
         print("  [6/11] Shareholding Pattern …")
         shp_raw = self.scraper.shareHolding(quarterly=False, withAddon=True)
 
+        # Quarterly Shareholding (for QoQ institutional flow tracking)
+        print("  [6b/11] Quarterly Shareholding …")
+        try:
+            qshp_raw = self.scraper.shareHolding(quarterly=True, withAddon=True)
+        except Exception:
+            qshp_raw = {}
+
         print("  [7/11] Price History …")
         price_raw = self.scraper.closePrice()
 
@@ -403,6 +417,27 @@ class DataIngestion:
         macro = feeds.macro_indicators() if feeds.available else {}
         beta_info = feeds.estimate_beta(symbol) if feeds.available else {}
 
+        # Upcoming Results Calendar (from BSE)
+        print("  [11b/11] Upcoming Results Calendar …")
+        upcoming_results = []
+        try:
+            all_upcoming = self.scraper.upcomingResults()
+            if isinstance(all_upcoming, list):
+                # Filter for this company's BSE token
+                # BSE API uses 'scrip_Code' (capital C)
+                for entry in all_upcoming:
+                    if not isinstance(entry, dict):
+                        continue
+                    entry_code = str(
+                        entry.get('scrip_Code',
+                        entry.get('scrip_code',
+                        entry.get('Scrip_Code', '')))
+                    )
+                    if entry_code == str(token):
+                        upcoming_results.append(entry)
+        except Exception:
+            upcoming_results = []
+
         data = {
             'symbol':          symbol,
             'token':           token,
@@ -412,11 +447,13 @@ class DataIngestion:
             'cash_flow':       self._dict_to_dataframe(cf_raw),
             'ratios':          self._dict_to_dataframe(ratios_raw),
             'shareholding':    self._dict_to_dataframe(shp_raw),
+            'quarterly_shareholding': self._dict_to_dataframe(qshp_raw),
             'price':           self._parse_price_data(price_raw),
             'annual_reports':  annual_reports,
             'concall_links':   concall_links,
             'concall_texts':   concall_texts,
             'announcements':   announcements,
+            'upcoming_results': upcoming_results,
             'macro':           macro,
             'beta_info':       beta_info,
             'ttm_eps':         ttm_eps,
