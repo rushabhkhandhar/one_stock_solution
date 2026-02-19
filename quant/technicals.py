@@ -100,6 +100,9 @@ class TechnicalAnalyzer:
         # ── Volatility ───────────────────────────────────────
         result['volatility'] = self._volatility_analysis(close, high, low, has_ohlc)
 
+        # ── Support / Resistance Levels ──────────────────────
+        result['support_resistance'] = self._support_resistance(close, high, low, has_ohlc)
+
         # ── Overall Signal ───────────────────────────────────
         result['overall_signal'] = self._composite_signal(result)
 
@@ -550,3 +553,155 @@ class TechnicalAnalyzer:
             'bear_count': bear_signals,
             'total': total_signals,
         }
+
+    # ==================================================================
+    # Support / Resistance Levels (Pivot-Based)
+    # ==================================================================
+    def _support_resistance(self, close: pd.Series,
+                            high: pd.Series, low: pd.Series,
+                            has_ohlc: bool = True) -> dict:
+        """Compute pivot-based support and resistance levels.
+
+        Uses three methods, all from real price history:
+          1. Classic Pivot Points (daily: P, S1/S2/S3, R1/R2/R3)
+          2. Fibonacci Retracement levels from 52-week range
+          3. Volume-weighted price clusters (congestion zones)
+
+        Parameters
+        ----------
+        close, high, low : pd.Series of price data
+        has_ohlc : whether high/low are real (not proxied from close)
+        """
+        n = len(close)
+        if n < 30:
+            return {'available': False,
+                    'reason': 'Need ≥30 price bars for S/R levels'}
+
+        latest = float(close.iloc[-1])
+        result = {'available': True, 'current_price': round(latest, 2)}
+
+        # ── 1. Classic Pivot Points ──────────────────────────
+        # Use the last complete trading period (yesterday's H/L/C)
+        h_val = float(high.iloc[-2]) if len(high) >= 2 else float(high.iloc[-1])
+        l_val = float(low.iloc[-2]) if len(low) >= 2 else float(low.iloc[-1])
+        c_val = float(close.iloc[-2]) if len(close) >= 2 else float(close.iloc[-1])
+
+        pivot = (h_val + l_val + c_val) / 3
+        r1 = 2 * pivot - l_val
+        s1 = 2 * pivot - h_val
+        r2 = pivot + (h_val - l_val)
+        s2 = pivot - (h_val - l_val)
+        r3 = h_val + 2 * (pivot - l_val)
+        s3 = l_val - 2 * (h_val - pivot)
+
+        result['pivot_points'] = {
+            'pivot': round(pivot, 2),
+            'r1': round(r1, 2),
+            'r2': round(r2, 2),
+            'r3': round(r3, 2),
+            's1': round(s1, 2),
+            's2': round(s2, 2),
+            's3': round(s3, 2),
+        }
+
+        # Current position relative to pivot
+        if latest > r1:
+            result['pivot_zone'] = 'ABOVE_R1'
+        elif latest > pivot:
+            result['pivot_zone'] = 'ABOVE_PIVOT'
+        elif latest > s1:
+            result['pivot_zone'] = 'BELOW_PIVOT'
+        else:
+            result['pivot_zone'] = 'BELOW_S1'
+
+        # ── 2. Fibonacci Retracement (52-week range) ─────────
+        lookback = min(252, n)
+        period_high = float(high.tail(lookback).max())
+        period_low = float(low.tail(lookback).min())
+        fib_range = period_high - period_low
+
+        if fib_range > 0:
+            fib_levels = {}
+            for level, ratio in [('0.0%', 0.0), ('23.6%', 0.236),
+                                  ('38.2%', 0.382), ('50.0%', 0.5),
+                                  ('61.8%', 0.618), ('78.6%', 0.786),
+                                  ('100.0%', 1.0)]:
+                fib_levels[level] = round(period_high - fib_range * ratio, 2)
+
+            result['fibonacci'] = {
+                'period_high': round(period_high, 2),
+                'period_low': round(period_low, 2),
+                'levels': fib_levels,
+            }
+
+            # Find nearest Fibonacci support and resistance
+            fib_supports = [v for v in fib_levels.values() if v < latest]
+            fib_resistances = [v for v in fib_levels.values() if v > latest]
+            if fib_supports:
+                result['fibonacci']['nearest_support'] = max(fib_supports)
+            if fib_resistances:
+                result['fibonacci']['nearest_resistance'] = min(fib_resistances)
+
+        # ── 3. Price Congestion Zones ────────────────────────
+        # Cluster historical prices into zones to find areas where
+        # price spent the most time (natural S/R).
+        lookback_cong = min(500, n)
+        recent = close.tail(lookback_cong).values
+        num_bins = max(10, lookback_cong // 25)
+
+        counts, bin_edges = np.histogram(recent, bins=num_bins)
+
+        # Top congestion zones (highest frequency bins)
+        sorted_indices = np.argsort(counts)[::-1]
+        zones = []
+        for idx in sorted_indices[:5]:
+            zone_low = float(bin_edges[idx])
+            zone_high = float(bin_edges[idx + 1])
+            zone_mid = (zone_low + zone_high) / 2
+            frequency = int(counts[idx])
+            zone_type = 'SUPPORT' if zone_mid < latest else 'RESISTANCE'
+            zones.append({
+                'low': round(zone_low, 2),
+                'high': round(zone_high, 2),
+                'mid': round(zone_mid, 2),
+                'frequency': frequency,
+                'type': zone_type,
+            })
+
+        # Sort by proximity to current price
+        zones.sort(key=lambda z: abs(z['mid'] - latest))
+        result['congestion_zones'] = zones
+
+        # ── Summary: key levels ──────────────────────────────
+        supports = []
+        resistances = []
+
+        # From pivot points
+        for lbl, val in [('S1', s1), ('S2', s2), ('S3', s3)]:
+            if val < latest:
+                supports.append({'level': round(val, 2), 'source': f'Pivot {lbl}'})
+        for lbl, val in [('R1', r1), ('R2', r2), ('R3', r3)]:
+            if val > latest:
+                resistances.append({'level': round(val, 2), 'source': f'Pivot {lbl}'})
+
+        # From Fibonacci
+        if 'fibonacci' in result:
+            fib = result['fibonacci']
+            if fib.get('nearest_support'):
+                supports.append({
+                    'level': fib['nearest_support'],
+                    'source': 'Fibonacci'})
+            if fib.get('nearest_resistance'):
+                resistances.append({
+                    'level': fib['nearest_resistance'],
+                    'source': 'Fibonacci'})
+
+        # Sort supports descending (nearest first), resistances ascending
+        supports.sort(key=lambda x: -x['level'])
+        resistances.sort(key=lambda x: x['level'])
+
+        result['key_supports'] = supports[:4]
+        result['key_resistances'] = resistances[:4]
+
+        return result
+

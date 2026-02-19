@@ -413,3 +413,216 @@ class HybridPredictor:
                 return np.sqrt(var_fc)
         except Exception:
             return None
+
+    # ==================================================================
+    # ARIMAX — ARIMA with Macro Exogenous Regressors
+    # ==================================================================
+    def train_arimax(self, price_series, macro_data: dict) -> dict:
+        """
+        Train SARIMAX with macro variables as exogenous regressors.
+
+        Parameters
+        ----------
+        price_series : pd.Series
+            Daily close prices with DatetimeIndex.
+        macro_data : dict
+            {macro_name: pd.Series} of daily macro prices
+            (from MacroCorrelationEngine._fetch_macro_series).
+
+        Returns
+        -------
+        dict with training summary including exogenous factor names,
+        AIC comparison vs plain ARIMA, and coefficient info.
+        """
+        try:
+            from statsmodels.tsa.statespace.sarimax import SARIMAX
+        except ImportError:
+            return {'available': False,
+                    'reason': 'statsmodels not installed'}
+
+        if not macro_data:
+            return {'available': False,
+                    'reason': 'No macro data provided'}
+
+        series = pd.Series(price_series).dropna().astype(float)
+        if len(series) < 60:
+            return {'available': False,
+                    'reason': f'Need ≥60 observations, got {len(series)}'}
+
+        # ── Build aligned exogenous DataFrame ─────────────────────────
+        exog_df, factor_names = self._build_exog_matrix(series, macro_data)
+        if exog_df is None or exog_df.empty:
+            return {'available': False,
+                    'reason': 'Could not align macro data with price series'}
+
+        # Align price series to exog index
+        aligned_price = series.loc[exog_df.index]
+        if len(aligned_price) < 60:
+            return {'available': False,
+                    'reason': f'Aligned data too short ({len(aligned_price)} obs)'}
+
+        # ── Grid search SARIMAX with exog ─────────────────────────────
+        best_aic = np.inf
+        best_order = (1, 1, 1)
+        best_result = None
+
+        for p in range(0, 3):
+            for q in range(0, 3):
+                try:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore')
+                        model = SARIMAX(
+                            aligned_price,
+                            exog=exog_df,
+                            order=(p, 1, q),
+                            enforce_stationarity=False,
+                            enforce_invertibility=False,
+                        )
+                        res = model.fit(disp=False, maxiter=100)
+                        if res.aic < best_aic:
+                            best_aic = res.aic
+                            best_order = (p, 1, q)
+                            best_result = res
+                except Exception:
+                    continue
+
+        if best_result is None:
+            return {'available': False,
+                    'reason': 'All ARIMAX model fits failed'}
+
+        self._arimax_result = best_result
+        self._arimax_exog = exog_df
+        self._arimax_factors = factor_names
+        self._arimax_series = aligned_price
+        self._arimax_macro_data = macro_data
+
+        # ── Extract coefficient significance ──────────────────────────
+        coefficients = {}
+        for fname in factor_names:
+            if fname in best_result.params.index:
+                coeff = float(best_result.params[fname])
+                pval = float(best_result.pvalues[fname])
+                coefficients[fname] = {
+                    'coefficient': round(coeff, 6),
+                    'p_value': round(pval, 4),
+                    'significant': pval < 0.05,
+                }
+
+        significant_factors = [k for k, v in coefficients.items()
+                               if v.get('significant')]
+
+        # Compare AIC with plain ARIMA (already trained)
+        plain_aic = (self._arima_result.aic
+                     if self._arima_result is not None else None)
+
+        return {
+            'available': True,
+            'arimax_order': best_order,
+            'arimax_aic': round(best_aic, 2),
+            'plain_arima_aic': round(plain_aic, 2) if plain_aic else None,
+            'aic_improvement': (round(plain_aic - best_aic, 2)
+                                if plain_aic else None),
+            'factors': factor_names,
+            'coefficients': coefficients,
+            'significant_factors': significant_factors,
+            'num_observations': len(aligned_price),
+        }
+
+    def predict_arimax(self, days: int = 30) -> dict:
+        """
+        Forecast using the ARIMAX model with projected exogenous vars.
+
+        Exogenous variables are projected forward using their own
+        trailing 20-day trend (linear extrapolation from real data).
+        """
+        if not hasattr(self, '_arimax_result') or self._arimax_result is None:
+            return {'available': False,
+                    'reason': 'ARIMAX model not trained'}
+
+        # ── Project exogenous variables forward ───────────────────────
+        exog_future = self._project_exog_forward(days)
+        if exog_future is None:
+            return {'available': False,
+                    'reason': 'Cannot project macro variables forward'}
+
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                fc = self._arimax_result.get_forecast(
+                    steps=days, exog=exog_future)
+                arimax_mean = fc.predicted_mean.values
+                arimax_ci = fc.conf_int()
+        except Exception as e:
+            return {'available': False, 'reason': f'ARIMAX forecast failed: {e}'}
+
+        last_price = float(self._arimax_series.iloc[-1])
+        end_price = float(arimax_mean[-1])
+        pct_change = round((end_price / last_price - 1) * 100, 2)
+
+        ci_lower = arimax_ci.iloc[:, 0].values
+        ci_upper = arimax_ci.iloc[:, 1].values
+
+        return {
+            'available': True,
+            'days': days,
+            'last_price': round(last_price, 2),
+            'forecast': [round(float(f), 2) for f in arimax_mean],
+            'ci_lower': [round(float(c), 2) for c in ci_lower],
+            'ci_upper': [round(float(c), 2) for c in ci_upper],
+            'end_price': round(end_price, 2),
+            'pct_change_30d': pct_change,
+            'factors_used': getattr(self, '_arimax_factors', []),
+        }
+
+    @staticmethod
+    def _build_exog_matrix(price_series: pd.Series,
+                           macro_data: dict):
+        """Build aligned exogenous DataFrame from macro series.
+
+        Uses daily returns of macro variables (not levels) as features
+        to avoid spurious regression with non-stationary prices.
+        """
+        frames = {}
+        factor_names = []
+
+        for name, macro_series in macro_data.items():
+            if name == 'nifty50':
+                continue  # Market benchmark, not exogenous
+            if len(macro_series) < 30:
+                continue
+            # Use returns (stationary) rather than levels
+            ret = macro_series.pct_change().dropna()
+            ret.name = name
+            frames[name] = ret
+            factor_names.append(name)
+
+        if not frames:
+            return None, []
+
+        # Build DataFrame and align with price series index
+        exog_df = pd.DataFrame(frames)
+        common_idx = price_series.index.intersection(exog_df.index)
+        if len(common_idx) < 60:
+            return None, []
+
+        exog_df = exog_df.loc[common_idx].fillna(0)
+        return exog_df, factor_names
+
+    def _project_exog_forward(self, days: int):
+        """Project exogenous variables forward using trailing trend."""
+        if not hasattr(self, '_arimax_exog') or self._arimax_exog is None:
+            return None
+
+        exog = self._arimax_exog
+        projected = {}
+
+        for col in exog.columns:
+            # Use trailing 20-day mean of returns as forward projection
+            tail = exog[col].tail(20)
+            if tail.empty:
+                projected[col] = [0.0] * days
+            else:
+                mean_ret = float(tail.mean())
+                projected[col] = [mean_ret] * days
+
+        return pd.DataFrame(projected, index=range(days))

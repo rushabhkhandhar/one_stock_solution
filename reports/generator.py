@@ -588,6 +588,151 @@ class ReportGenerator:
                             'STABLE': '🟡'}.get(margin_tr, '⚪')
                 a(f"> {mtr_icon} **Margin Trend:** {margin_tr}\n")
 
+        # ── Tier 3: Dividend Dashboard ───────────────────────
+        div_dash = analysis.get('dividend_dash', {})
+        if div_dash.get('available'):
+            a("## 💰 Dividend Dashboard\n")
+
+            payout_hist = div_dash.get('payout_history', [])
+            if payout_hist:
+                a("### Payout Ratio History\n")
+                a("| Year | EPS (₹) | DPS (₹) | Payout % |")
+                a("|------|--------:|--------:|---------:|")
+                for h in payout_hist:
+                    a(f"| {h.get('year', '')} "
+                      f"| ₹{h.get('eps', 0):.2f} "
+                      f"| ₹{h.get('dps', 0):.2f} "
+                      f"| {h.get('payout_pct', 0):.1f}% |")
+                a("")
+
+            yield_hist = div_dash.get('yield_history', [])
+            if yield_hist:
+                a("### Dividend Yield Trend\n")
+                a("| Year | DPS (₹) | Avg Price (₹) | Yield % |")
+                a("|------|--------:|--------------:|--------:|")
+                for h in yield_hist:
+                    a(f"| {h.get('year', '')} "
+                      f"| ₹{h.get('dps', 0):.2f} "
+                      f"| ₹{h.get('avg_price', 0):,.0f} "
+                      f"| {h.get('yield_pct', 0):.2f}% |")
+                a("")
+
+            # Growth rate
+            cagr = div_dash.get('dividend_cagr_pct')
+            if cagr is not None:
+                cagr_icon = '🟢' if cagr > 0 else '🔴'
+                a(f"> {cagr_icon} **Dividend CAGR:** {cagr:+.1f}%\n")
+
+            # Sustainability
+            sust = div_dash.get('sustainability')
+            if sust:
+                s_icon = {'STRONG': '🟢', 'ADEQUATE': '🟡',
+                          'AT_RISK': '🔴'}.get(sust, '⚪')
+                cov = div_dash.get('ocf_dividend_coverage', 0)
+                a(f"> {s_icon} **Sustainability:** {sust} — "
+                  f"CFO covers dividends **{cov:.1f}x**\n")
+                detail = div_dash.get('sustainability_detail', '')
+                if detail:
+                    a(f"> {detail}\n")
+
+            # Consistency
+            consistency = div_dash.get('consistency_pct')
+            if consistency is not None:
+                yp = div_dash.get('years_paid', 0)
+                ty = div_dash.get('total_years', 0)
+                a(f"> 📊 **Consistency:** Paid dividends in {yp}/{ty} years "
+                  f"({consistency:.0f}%)\n")
+
+        # ── Tier 3: Capital Allocation Scorecard ─────────────
+        cap_alloc = analysis.get('cap_alloc', {})
+        if cap_alloc.get('available'):
+            a("## 🏗️ Capital Allocation Scorecard\n")
+
+            style = cap_alloc.get('style', '')
+            style_detail = cap_alloc.get('style_detail', '')
+            style_icon = {
+                'GROWTH-ORIENTED': '📈', 'SHAREHOLDER-FRIENDLY': '💵',
+                'DELEVERAGING': '🏦', 'BALANCED': '⚖️',
+                'MIXED': '🔀',
+            }.get(style, '📊')
+            a(f"**{style_icon} Allocation Style: {style}**\n")
+            if style_detail:
+                a(f"> {style_detail}\n")
+
+            # Average allocation summary
+            a("### Average CFO Deployment\n")
+            a("| Category | % of CFO |")
+            a("|----------|--------:|")
+            for cat, key in [('CapEx (Growth)', 'avg_capex_pct'),
+                             ('Dividends (Returns)', 'avg_dividends_pct'),
+                             ('Debt Repayment', 'avg_debt_repaid_pct'),
+                             ('Residual (Acquisitions/Other)', 'avg_residual_pct')]:
+                val = cap_alloc.get(key)
+                if val is not None:
+                    a(f"| {cat} | {val:.1f}% |")
+            num_yrs = cap_alloc.get('num_years', 0)
+            if num_yrs:
+                a(f"\n*Based on {num_yrs} years of positive-CFO data.*\n")
+
+            # Year-by-year breakdown (last 5 years)
+            years = cap_alloc.get('years', [])
+            pos_years = [y for y in years if y.get('cfo', 0) > 0
+                         and 'capex_pct' in y]
+            if pos_years:
+                show_years = pos_years[-5:]
+                a("### Year-by-Year Breakdown\n")
+                a("| Year | CFO (Cr) | CapEx % | Dividends % | Debt Repay % | Residual % |")
+                a("|------|--------:|--------:|------------:|-------------:|-----------:|")
+                for y in show_years:
+                    a(f"| {y.get('year', '')} "
+                      f"| ₹{y.get('cfo', 0):,.0f} "
+                      f"| {y.get('capex_pct', 0):.1f}% "
+                      f"| {y.get('dividends_pct', 0):.1f}% "
+                      f"| {y.get('debt_repaid_pct', 0):.1f}% "
+                      f"| {y.get('residual_pct', 0):.1f}% |")
+                a("")
+
+        # ── Tier 3: Scenario Analysis (Bull/Base/Bear) ───────
+        scenario = analysis.get('scenario', {})
+        if scenario.get('available'):
+            a("## 🎯 Scenario Analysis — Bull / Base / Bear\n")
+
+            scenarios = scenario.get('scenarios', {})
+            dp = scenario.get('data_points', {})
+            a(f"*Derived from {dp.get('growth_years', 0)} years of growth data, "
+              f"{dp.get('margin_years', 0)} years of margins, "
+              f"and {dp.get('pe_observations', 0)} P/E observations.*\n")
+
+            a("### Scenario Assumptions & Targets\n")
+            a("| Scenario | Rev Growth | PAT Margin | Exit P/E "
+              "| Target Price | Upside | Probability |")
+            a("|----------|----------:|-----------:|--------:"
+              "|-------------:|-------:|------------:|")
+            for label in ['bull', 'base', 'bear']:
+                s = scenarios.get(label, {})
+                icon = {'bull': '🟢', 'base': '🟡', 'bear': '🔴'}.get(label, '⚪')
+                rg = s.get('revenue_growth_pct', 0)
+                pm = s.get('pat_margin_pct', 0)
+                epe = s.get('exit_pe', 0)
+                tp = s.get('target_price', 0)
+                up = s.get('upside_pct')
+                prob = s.get('probability', 0)
+                up_s = f"{up:+.1f}%" if up is not None else '—'
+                a(f"| {icon} **{label.title()}** "
+                  f"| {rg:+.1f}% | {pm:.1f}% | {epe:.1f}x "
+                  f"| ₹{tp:,.2f} | {up_s} | {prob:.0%} |")
+            a("")
+
+            wt = scenario.get('weighted_target')
+            wu = scenario.get('weighted_upside_pct')
+            cmp = scenario.get('current_price')
+            if wt:
+                a(f"> 🎯 **Probability-Weighted Target: ₹{wt:,.2f}**")
+                if wu is not None:
+                    a(f" ({wu:+.1f}% from current ₹{cmp:,.2f})\n")
+                else:
+                    a("\n")
+
         # ── DCF Valuation ────────────────────────────────────
         a("## 💰 Valuation Analysis — DCF Model\n")
         if is_suspended:
@@ -1773,6 +1918,65 @@ class ReportGenerator:
                     a(f"| Hist. Volatility (20d, ann.) | {volatility['hist_volatility_20d']:.1f}% |")
                 a("")
 
+            # Support / Resistance Levels
+            sr = tech.get('support_resistance', {})
+            if sr.get('available'):
+                a("### 📍 Support & Resistance Levels\n")
+
+                # Pivot Points
+                pp_data = sr.get('pivot_points', {})
+                if pp_data:
+                    a("**Classic Pivot Points:**\n")
+                    a("| Level | Price |")
+                    a("|-------|------:|")
+                    for lbl in ['r3', 'r2', 'r1', 'pivot', 's1', 's2', 's3']:
+                        val = pp_data.get(lbl)
+                        if val is not None:
+                            tag = lbl.upper()
+                            marker = ' ◀ Current' if lbl == 'pivot' else ''
+                            a(f"| {tag} | ₹{val:,.2f}{marker} |")
+                    pz = sr.get('pivot_zone', '')
+                    if pz:
+                        a(f"\n*Price position: **{pz.replace('_', ' ')}***\n")
+
+                # Fibonacci Retracement
+                fib = sr.get('fibonacci', {})
+                if fib:
+                    a("**Fibonacci Retracement (52-Week Range):**\n")
+                    a(f"52W High: ₹{fib.get('period_high', 0):,.2f} | "
+                      f"52W Low: ₹{fib.get('period_low', 0):,.2f}\n")
+                    levels = fib.get('levels', {})
+                    if levels:
+                        a("| Level | Price |")
+                        a("|-------|------:|")
+                        for lvl_name in ['0.0%', '23.6%', '38.2%', '50.0%',
+                                         '61.8%', '78.6%', '100.0%']:
+                            v = levels.get(lvl_name)
+                            if v is not None:
+                                a(f"| {lvl_name} | ₹{v:,.2f} |")
+                        a("")
+                    ns = fib.get('nearest_support')
+                    nr = fib.get('nearest_resistance')
+                    if ns:
+                        a(f"> 🟢 Nearest Fibonacci Support: **₹{ns:,.2f}**\n")
+                    if nr:
+                        a(f"> 🔴 Nearest Fibonacci Resistance: **₹{nr:,.2f}**\n")
+
+                # Key S/R Summary
+                key_sup = sr.get('key_supports', [])
+                key_res = sr.get('key_resistances', [])
+                if key_sup or key_res:
+                    a("**Key Levels Summary:**\n")
+                    if key_sup:
+                        sup_strs = [f"₹{s['level']:,.2f} ({s['source']})"
+                                    for s in key_sup[:3]]
+                        a(f"- 🟢 **Supports:** {' → '.join(sup_strs)}")
+                    if key_res:
+                        res_strs = [f"₹{r['level']:,.2f} ({r['source']})"
+                                    for r in key_res[:3]]
+                        a(f"- 🔴 **Resistances:** {' → '.join(res_strs)}")
+                    a("")
+
         # ── Market Correlation ───────────────────────────────
         fc = analysis.get('flow_corr', {})
         if fc.get('available'):
@@ -1881,6 +2085,63 @@ class ReportGenerator:
                 for sig in signals:
                     a(f"- {sig}")
                 a("")
+
+        # ── ARIMAX Forecast ──────────────────────────────────
+        arimax_train = analysis.get('arimax_train', {})
+        arimax_fc = analysis.get('arimax_forecast', {})
+        if arimax_train.get('available'):
+            a("## 🧬 ARIMAX — Macro-Augmented Price Forecast\n")
+            a("*SARIMAX model with macro variables (oil, USD/INR, gold, VIX) "
+              "as exogenous regressors.*\n")
+
+            a("| Metric | Value |")
+            a("|--------|------:|")
+            a(f"| ARIMAX Order | {arimax_train.get('arimax_order', 'N/A')} |")
+            a(f"| ARIMAX AIC | {arimax_train.get('arimax_aic', 'N/A')} |")
+            plain_aic = arimax_train.get('plain_arima_aic')
+            if plain_aic:
+                a(f"| Plain ARIMA AIC | {plain_aic} |")
+            aic_imp = arimax_train.get('aic_improvement')
+            if aic_imp is not None:
+                imp_icon = '🟢' if aic_imp > 0 else '🔴'
+                a(f"| AIC Improvement | {imp_icon} {aic_imp:+.1f} |")
+            a(f"| Observations | {arimax_train.get('num_observations', 'N/A')} |")
+            a("")
+
+            # Significant macro regressors
+            sig_factors = arimax_train.get('significant_factors', [])
+            coefficients = arimax_train.get('coefficients', {})
+            if sig_factors:
+                a("### Significant Macro Regressors\n")
+                a("| Factor | Coefficient | p-value |")
+                a("|--------|----------:|--------:|")
+                for sf in sig_factors:
+                    info = coefficients.get(sf, {})
+                    a(f"| {sf.replace('_', ' ').title()} "
+                      f"| {info.get('coefficient', 0):.6f} "
+                      f"| {info.get('p_value', 1):.4f} |")
+                a("")
+            else:
+                a("> ℹ️ No macro regressors reached p < 0.05 significance — "
+                  "stock appears primarily idiosyncratic.\n")
+
+            # ARIMAX Forecast
+            if arimax_fc.get('available'):
+                a("### ARIMAX 30-Day Forecast\n")
+                a("| Metric | Value |")
+                a("|--------|------:|")
+                _ep = arimax_fc.get('end_price')
+                a(f"| 30-Day ARIMAX Target | "
+                  f"{f'₹{_ep:,.2f}' if _ep else 'N/A'} |")
+                _pc = arimax_fc.get('pct_change_30d')
+                a(f"| Expected Move | "
+                  f"{f'{_pc:+.1f}%' if _pc is not None else 'N/A'} |")
+                a("")
+                ci_lo = arimax_fc.get('ci_lower', [])
+                ci_hi = arimax_fc.get('ci_upper', [])
+                if ci_lo and ci_hi:
+                    a(f"> 95% ARIMAX Band (Day 30): "
+                      f"₹{ci_lo[-1]:,.2f} — ₹{ci_hi[-1]:,.2f}\n")
 
         # ── Macro Context ────────────────────────────────────
         macro = data.get('macro', {})

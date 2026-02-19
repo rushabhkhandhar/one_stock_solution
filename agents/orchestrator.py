@@ -42,6 +42,8 @@ from quant.forensic_dashboard import ForensicDashboard
 from quant.tier2_analytics import (
     DuPontAnalysis, AltmanZScore, WorkingCapitalTrend,
     HistoricalValuationBand, QuarterlyPerformanceMatrix)
+from quant.tier3_analytics import (
+    DividendDashboard, CapitalAllocationScorecard, ScenarioAnalysis)
 from predictive.arima_ets import HybridPredictor
 from predictive.flow_correlation import FlowCorrelation
 from predictive.macro_engine import MacroCorrelationEngine
@@ -92,6 +94,9 @@ class Orchestrator:
         self.wcc_trend         = WorkingCapitalTrend()
         self.hist_valuation    = HistoricalValuationBand()
         self.qtr_matrix        = QuarterlyPerformanceMatrix()
+        self.dividend_dash     = DividendDashboard()
+        self.cap_alloc         = CapitalAllocationScorecard()
+        self.scenario          = ScenarioAnalysis()
         self.reporter          = ReportGenerator()
 
     # ==================================================================
@@ -361,6 +366,47 @@ class Orchestrator:
                 print(f"  ⚠ Quarterly Matrix: {qm.get('reason', 'N/A')}")
         except Exception as e:
             analysis['qtr_matrix'] = {'available': False, 'reason': str(e)}
+
+        # ── Phase 3.7: Tier 3 Extended Analytics ────────────
+        print("\n📊  PHASE 3.7 — Tier 3 Extended Analytics")
+
+        print("  ▸ Dividend Dashboard …")
+        try:
+            analysis['dividend_dash'] = self.dividend_dash.analyze(data)
+            dd = analysis['dividend_dash']
+            if dd.get('available'):
+                print(f"  ✔ Dividends: Payout {dd.get('latest_payout_pct', 0):.1f}% "
+                      f"| Sustainability: {dd.get('sustainability', 'N/A')}")
+            else:
+                print(f"  ⚠ Dividends: {dd.get('reason', 'N/A')}")
+        except Exception as e:
+            analysis['dividend_dash'] = {'available': False, 'reason': str(e)}
+
+        print("  ▸ Capital Allocation Scorecard …")
+        try:
+            analysis['cap_alloc'] = self.cap_alloc.analyze(data)
+            ca = analysis['cap_alloc']
+            if ca.get('available'):
+                print(f"  ✔ Capital Allocation: {ca.get('style', 'N/A')} "
+                      f"| CapEx {ca.get('avg_capex_pct', 0):.0f}% "
+                      f"| Div {ca.get('avg_dividends_pct', 0):.0f}%")
+            else:
+                print(f"  ⚠ Cap Alloc: {ca.get('reason', 'N/A')}")
+        except Exception as e:
+            analysis['cap_alloc'] = {'available': False, 'reason': str(e)}
+
+        print("  ▸ Scenario Analysis (Bull/Base/Bear) …")
+        try:
+            analysis['scenario'] = self.scenario.analyze(data, analysis)
+            sc = analysis['scenario']
+            if sc.get('available'):
+                wt = sc.get('weighted_target', 0)
+                wu = sc.get('weighted_upside_pct', 0)
+                print(f"  ✔ Scenario: Weighted Target ₹{wt:,.2f} ({wu:+.1f}%)")
+            else:
+                print(f"  ⚠ Scenario: {sc.get('reason', 'N/A')}")
+        except Exception as e:
+            analysis['scenario'] = {'available': False, 'reason': str(e)}
 
         # ── Phase 3.5: Forensic Extras (RPT, Contingent, Auditor) ────
         print("\n🔬  PHASE 3.5 — Forensic Deep Dive")
@@ -713,6 +759,52 @@ class Orchestrator:
                                               'reason': 'Insufficient price data'}
             except Exception as e:
                 analysis['macro_corr'] = {'available': False, 'reason': str(e)}
+
+            # ── ARIMAX: ARIMA with Macro Exogenous Regressors ──
+            print("  ▸ ARIMAX (macro-augmented forecast) …")
+            try:
+                mc = analysis.get('macro_corr', {})
+                if (mc.get('available')
+                        and self.predictor.available
+                        and close_series_m is not None
+                        and len(close_series_m) > 60):
+                    # Fetch macro price series from the engine
+                    macro_price_data = self.macro_engine._fetch_macro_series('2y')
+                    if macro_price_data:
+                        arimax_train = self.predictor.train_arimax(
+                            close_series_m, macro_price_data)
+                        if arimax_train.get('available'):
+                            analysis['arimax_train'] = arimax_train
+                            analysis['arimax_forecast'] = self.predictor.predict_arimax(days=30)
+                            axf = analysis['arimax_forecast']
+                            aic_imp = arimax_train.get('aic_improvement')
+                            print(f"  ✔ ARIMAX trained: AIC {arimax_train.get('arimax_aic')} "
+                                  f"(improvement: {aic_imp:+.1f})" if aic_imp else
+                                  f"  ✔ ARIMAX trained: AIC {arimax_train.get('arimax_aic')}")
+                            sig_f = arimax_train.get('significant_factors', [])
+                            if sig_f:
+                                print(f"    Significant macro regressors: {', '.join(sig_f)}")
+                            if axf.get('available'):
+                                print(f"    30-day ARIMAX target: ₹{axf.get('end_price', 0):,.2f} "
+                                      f"({axf.get('pct_change_30d', 0):+.1f}%)")
+                        else:
+                            analysis['arimax_train'] = arimax_train
+                            analysis['arimax_forecast'] = {'available': False,
+                                                          'reason': arimax_train.get('reason', 'Training failed')}
+                            print(f"  ⚠ ARIMAX: {arimax_train.get('reason', 'N/A')}")
+                    else:
+                        analysis['arimax_train'] = {'available': False,
+                                                    'reason': 'No macro price data'}
+                        analysis['arimax_forecast'] = {'available': False,
+                                                      'reason': 'No macro price data'}
+                else:
+                    analysis['arimax_train'] = {'available': False,
+                                                'reason': 'Prerequisites not met (macro-corr or price data)'}
+                    analysis['arimax_forecast'] = {'available': False,
+                                                  'reason': 'Prerequisites not met'}
+            except Exception as e:
+                analysis['arimax_train'] = {'available': False, 'reason': str(e)}
+                analysis['arimax_forecast'] = {'available': False, 'reason': str(e)}
 
         except Exception as e:
             print(f"  ⚠ Technical/Predictive error: {e}")
