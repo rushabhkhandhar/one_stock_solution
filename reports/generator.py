@@ -462,10 +462,11 @@ class ReportGenerator:
                     hist = m.get('history', [])
                     if hist and len(hist) > 2:
                         a(f"**{m.get('label', '')} — History:**\n")
-                        a("| " + " | ".join(str(h.get('year', '')) for h in hist) + " |")
+                        # hist entries are (year, value) tuples
+                        a("| " + " | ".join(str(h[0]) for h in hist) + " |")
                         a("| " + " | ".join("---:" for _ in hist) + " |")
                         a("| " + " | ".join(
-                            f"{h.get('value', 0):.1f}" for h in hist) + " |")
+                            f"{h[1]:.1f}" for h in hist) + " |")
                         a("")
         elif wcc.get('sector_skip'):
             a("## 🔄 Working Capital Cycle — Multi-Year Trend\n")
