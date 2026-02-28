@@ -536,6 +536,7 @@ def export_markdown_to_pdf(md_filepath: str, symbol: str,
         # ── Main rendering loop ──────────────────────────────
         lines_list = md_text.split('\n')
         table_buffer = []        # collect contiguous table rows
+        _pending_heading = None  # deferred ### heading for chart pages
         i = 0
         while i < len(lines_list):
             line = lines_list[i]
@@ -571,10 +572,25 @@ def export_markdown_to_pdf(md_filepath: str, symbol: str,
                 pdf.line(10, pdf.get_y(), 200, pdf.get_y())
                 pdf.ln(3)
             elif stripped.startswith('### '):
-                pdf._font('B', 12)
-                text = _strip_md(stripped[4:].strip())
-                pdf.safe_multi_cell(0, 7, clean(text))
-                pdf.ln(2)
+                # Peek ahead: if next non-empty line is an image, defer
+                # the heading so it appears on the same page as the image
+                next_img = False
+                for k in range(i + 1, len(lines_list)):
+                    nxt = lines_list[k].strip()
+                    if nxt == '':
+                        continue
+                    if nxt.startswith('!['):
+                        next_img = True
+                    break
+                if not next_img:
+                    pdf._font('B', 12)
+                    text = _strip_md(stripped[4:].strip())
+                    pdf.safe_multi_cell(0, 7, clean(text))
+                    pdf.ln(2)
+                else:
+                    # Store heading text; it will be rendered on the new
+                    # page created by the image handler below.
+                    _pending_heading = _strip_md(stripped[4:].strip())
 
             # Blockquotes
             elif stripped.startswith('>'):
@@ -611,6 +627,50 @@ def export_markdown_to_pdf(md_filepath: str, symbol: str,
                 text = _strip_md(stripped)
                 pdf.safe_multi_cell(0, 6, clean(text))
                 pdf.ln(1)
+
+            # Inline images  ![alt](path)  — one image per page
+            elif stripped.startswith('!['):
+                img_match = re.match(r'!\[.*?\]\((.+?)\)', stripped)
+                if img_match:
+                    img_rel = img_match.group(1)
+                    # Skip data URIs — fpdf2 can only embed files
+                    if not img_rel.startswith('data:'):
+                        md_dir = os.path.dirname(os.path.abspath(md_filepath))
+                        img_abs = os.path.normpath(os.path.join(md_dir, img_rel))
+                        if os.path.isfile(img_abs):
+                            try:
+                                # Always start a fresh page for each chart
+                                pdf.add_page()
+                                # Render deferred heading if present
+                                if _pending_heading:
+                                    pdf._font('B', 12)
+                                    pdf.safe_multi_cell(0, 7, clean(_pending_heading))
+                                    pdf.ln(2)
+                                    _pending_heading = None
+                                usable_w = pdf.w - pdf.l_margin - pdf.r_margin
+                                usable_h = pdf.h - pdf.t_margin - pdf.b_margin - pdf.get_y() + pdf.t_margin - 5
+                                # Fit image to page while keeping aspect ratio
+                                from PIL import Image as PILImage
+                                with PILImage.open(img_abs) as im:
+                                    iw, ih = im.size
+                                aspect = ih / iw if iw else 1
+                                render_w = usable_w
+                                render_h = render_w * aspect
+                                if render_h > usable_h:
+                                    render_h = usable_h
+                                    render_w = render_h / aspect
+                                x_pos = pdf.l_margin + (usable_w - render_w) / 2
+                                pdf.image(img_abs, x=x_pos, y=pdf.get_y(),
+                                          w=render_w, h=render_h)
+                                pdf.ln(render_h + 4)
+                            except Exception as img_err:
+                                pdf._font('I', 8)
+                                pdf.safe_multi_cell(0, 5, f"[Image error: {img_err}]")
+                                pdf.ln(1)
+                        else:
+                            pdf._font('I', 8)
+                            pdf.safe_multi_cell(0, 5, f"[Image not found: {img_rel}]")
+                            pdf.ln(1)
 
             # Normal text
             elif stripped:

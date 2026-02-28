@@ -35,3 +35,11 @@ fpdf2>=2.8                    # Pure-Python PDF generation (fallback)
 markdown2>=2.5                # Markdown → HTML conversion
 # weasyprint>=60               # (Optional) High-quality HTML→PDF; needs system libs
 # tqdm, regex, PyYAML, Jinja2, joblib, fsspec, etc.
+
+# ── Step 5: Technical Report Visualizations ──────────────
+plotly>=5.20                  # High-fidelity interactive / static charts
+kaleido                       # Static image export for plotly
+mplfinance>=0.12              # Candlestick / OHLC charts (optional fallback)
+matplotlib>=3.8               # Core plotting backend
+scipy>=1.14                   # VaR (norm distribution), statistical functions
+Pillow>=10.0                  # Image dimension reading for PDF layout
