@@ -132,7 +132,7 @@ def run_technical_report(
     print(f"{'='*60}")
 
     # ── 1. Fetch data ────────────────────────────────────────
-    print("\n[1/6] Fetching OHLCV data ...")
+    print("\n[1/9] Fetching OHLCV data ...")
     df = _fetch_ohlcv(symbol, days)
     if df.empty:
         result["error"] = "No OHLCV data retrieved"
@@ -149,7 +149,7 @@ def run_technical_report(
     benchmark_close = _fetch_benchmark_close(days)
 
     # ── 2. Compute Risk Metrics ──────────────────────────────
-    print("\n[2/6] Computing risk & performance metrics ...")
+    print("\n[2/9] Computing risk & performance metrics ...")
     try:
         from technical_report.risk_metrics import RiskMetricsEngine
         risk_engine = RiskMetricsEngine()
@@ -162,7 +162,7 @@ def run_technical_report(
         print(f"  ⚠ Risk metrics failed: {e}")
 
     # ── 3. Compute Volatility Model ──────────────────────────
-    print("\n[3/6] Computing volatility analytics ...")
+    print("\n[3/9] Computing volatility analytics ...")
     try:
         from technical_report.volatility_model import VolatilityModel
         vol_model = VolatilityModel()
@@ -174,7 +174,7 @@ def run_technical_report(
         print(f"  ⚠ Volatility model failed: {e}")
 
     # ── 4. Compute Price Levels & Indicators ─────────────────
-    print("\n[4/6] Computing S/R levels & momentum indicators ...")
+    print("\n[4/9] Computing S/R levels & momentum indicators ...")
     try:
         from technical_report.price_levels import PriceLevelDetector
         pl_engine = PriceLevelDetector()
@@ -202,8 +202,93 @@ def run_technical_report(
         boll_data = {"available": False}
         print(f"  ⚠ Indicators failed: {e}")
 
-    # ── 5. Generate Charts ───────────────────────────────────
-    print("\n[5/6] Generating charts ...")
+    # ── 5. Advanced Statistical Features ─────────────────────
+    print("\n[5/9] Computing advanced statistics (HMM, Hurst, ACF) ...")
+    hmm_data = {"available": False}
+    hurst_data = {"available": False}
+    acf_data = {"available": False}
+    try:
+        from technical_report.advanced_stats import (
+            hmm_regime_detection, hurst_exponent, acf_pacf,
+        )
+        hmm_data = hmm_regime_detection(close)
+        hurst_data = hurst_exponent(close)
+        acf_data = acf_pacf(close)
+        if hmm_data.get("available"):
+            print(f"  ✓ HMM regime: {hmm_data.get('current_regime_label', 'N/A')}")
+        else:
+            print(f"  ⚠ HMM: {hmm_data.get('reason', 'unavailable')}")
+        print(f"  ✓ Hurst: {hurst_data.get('hurst', 'N/A')} ({hurst_data.get('interpretation', '')})")
+        sig_lags = acf_data.get("significant_acf_lags", [])
+        print(f"  ✓ ACF significant lags: {sig_lags[:5]}")
+    except Exception as e:
+        print(f"  ⚠ Advanced stats failed: {e}")
+
+    # ── 6. Relative & Benchmark Analysis ─────────────────────
+    print("\n[6/9] Computing relative analysis (Beta, Mansfield RS) ...")
+    beta_data = {"available": False}
+    mrs_data = {"available": False}
+    try:
+        from technical_report.relative_analysis import (
+            rolling_beta_correlation, mansfield_relative_strength,
+        )
+        if benchmark_close is not None:
+            beta_data = rolling_beta_correlation(close, benchmark_close)
+            mrs_data = mansfield_relative_strength(close, benchmark_close)
+            if beta_data.get("available"):
+                print(f"  ✓ Beta: {beta_data.get('current_beta', 'N/A')} | "
+                      f"Corr: {beta_data.get('current_correlation', 'N/A')}")
+            if mrs_data.get("available"):
+                print(f"  ✓ Mansfield RS: {mrs_data.get('current_mrs', 'N/A')} "
+                      f"({mrs_data.get('interpretation', '')})")
+        else:
+            print("  ⚠ Benchmark data unavailable — skipping relative analysis")
+    except Exception as e:
+        print(f"  ⚠ Relative analysis failed: {e}")
+
+    # ── 7. Trend Indicators ──────────────────────────────────
+    print("\n[7/9] Computing trend indicators (ADX, Supertrend, Patterns) ...")
+    adx_data = {"available": False}
+    supertrend_data = {"available": False}
+    pattern_data = {"available": False}
+    try:
+        from technical_report.trend_indicators import (
+            adx_dmi, supertrend, candlestick_patterns,
+        )
+        adx_data = adx_dmi(high, low, close)
+        supertrend_data = supertrend(high, low, close)
+        open_col = df["open"].astype(float) if "open" in df.columns else close
+        pattern_data = candlestick_patterns(open_col, high, low, close)
+        if adx_data.get("available"):
+            print(f"  ✓ ADX: {adx_data.get('current_adx', 'N/A')} "
+                  f"({adx_data.get('trend_strength', '')})")
+        if supertrend_data.get("available"):
+            print(f"  ✓ Supertrend: {supertrend_data.get('current_direction', 'N/A')}")
+        print(f"  ✓ Candlestick patterns: {pattern_data.get('count', 0)} found")
+    except Exception as e:
+        print(f"  ⚠ Trend indicators failed: {e}")
+
+    # ── 8. Seasonality ───────────────────────────────────────
+    print("\n[8/9] Computing seasonality (Monthly heatmap, Day-of-Week) ...")
+    monthly_data = {"available": False}
+    dow_data = {"available": False}
+    try:
+        from technical_report.seasonality import (
+            monthly_return_heatmap, day_of_week_effect,
+        )
+        monthly_data = monthly_return_heatmap(close)
+        dow_data = day_of_week_effect(close)
+        if monthly_data.get("available"):
+            print(f"  ✓ Best month: {monthly_data.get('best_month')} "
+                  f"({monthly_data.get('best_month_avg_pct')}%)")
+        if dow_data.get("available"):
+            print(f"  ✓ Best day: {dow_data.get('best_day')} "
+                  f"({dow_data.get('best_day_avg_pct')}%)")
+    except Exception as e:
+        print(f"  ⚠ Seasonality failed: {e}")
+
+    # ── 9. Generate Charts ───────────────────────────────────
+    print("\n[9/9] Generating charts ...")
     chart_paths = {}
     try:
         from technical_report.visualizations import TechnicalVisualizer
@@ -218,6 +303,13 @@ def run_technical_report(
             rsi_data=rsi_data,
             macd_data=macd_data,
             boll_data=boll_data,
+            acf_data=acf_data,
+            beta_data=beta_data,
+            mrs_data=mrs_data,
+            adx_data=adx_data,
+            supertrend_data=supertrend_data,
+            monthly_data=monthly_data,
+            dow_data=dow_data,
         )
         print(f"  ✓ {len(chart_paths)} charts generated:")
         for name, path in chart_paths.items():
@@ -226,8 +318,8 @@ def run_technical_report(
         print(f"  ⚠ Chart generation failed: {e}")
         traceback.print_exc()
 
-    # ── 6. Build Report ──────────────────────────────────────
-    print("\n[6/6] Building report ...")
+    # ── 10. Build Report ─────────────────────────────────────
+    print("\n[10] Building report ...")
     try:
         from technical_report.report_builder import TechnicalReportBuilder
         builder = TechnicalReportBuilder(symbol, output_dir)
@@ -242,6 +334,16 @@ def run_technical_report(
             macd_data=macd_data,
             boll_data=boll_data,
             chart_paths=chart_paths,
+            hmm_data=hmm_data,
+            hurst_data=hurst_data,
+            acf_data=acf_data,
+            beta_data=beta_data,
+            mrs_data=mrs_data,
+            adx_data=adx_data,
+            supertrend_data=supertrend_data,
+            pattern_data=pattern_data,
+            monthly_data=monthly_data,
+            dow_data=dow_data,
         )
         result["md_path"] = md_path
         print(f"  ✓ Markdown: {md_path}")
@@ -271,6 +373,16 @@ def run_technical_report(
         "rsi": {k: v for k, v in rsi_data.items() if not k.startswith("_")},
         "macd": {k: v for k, v in macd_data.items() if not k.startswith("_")},
         "bollinger": {k: v for k, v in boll_data.items() if not k.startswith("_")},
+        "hmm": {k: v for k, v in hmm_data.items() if not k.startswith("_")},
+        "hurst": {k: v for k, v in hurst_data.items() if not k.startswith("_")},
+        "acf": {k: v for k, v in acf_data.items() if not k.startswith("_")},
+        "beta": {k: v for k, v in beta_data.items() if not k.startswith("_")},
+        "mrs": {k: v for k, v in mrs_data.items() if not k.startswith("_")},
+        "adx": {k: v for k, v in adx_data.items() if not k.startswith("_")},
+        "supertrend": {k: v for k, v in supertrend_data.items() if not k.startswith("_")},
+        "patterns": {k: v for k, v in pattern_data.items() if not k.startswith("_")},
+        "monthly": {k: v for k, v in monthly_data.items() if not k.startswith("_")},
+        "dow": {k: v for k, v in dow_data.items() if not k.startswith("_")},
     }
 
     print(f"\n{'='*60}")

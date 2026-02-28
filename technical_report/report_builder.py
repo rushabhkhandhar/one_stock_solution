@@ -61,6 +61,17 @@ class TechnicalReportBuilder:
         macd_data: dict,
         boll_data: dict,
         chart_paths: dict[str, str] | None = None,
+        # ── new data dicts ──
+        hmm_data: dict | None = None,
+        hurst_data: dict | None = None,
+        acf_data: dict | None = None,
+        beta_data: dict | None = None,
+        mrs_data: dict | None = None,
+        adx_data: dict | None = None,
+        supertrend_data: dict | None = None,
+        pattern_data: dict | None = None,
+        monthly_data: dict | None = None,
+        dow_data: dict | None = None,
     ) -> str:
         """Generate the full Markdown report. Returns path to .md file."""
         sections = [
@@ -70,6 +81,17 @@ class TechnicalReportBuilder:
             self._price_levels_section(price_levels),
             self._volume_section(vpvr_data, vwap_data),
             self._momentum_section(rsi_data, macd_data, boll_data),
+            self._advanced_stats_section(
+                hmm_data or {}, hurst_data or {}, acf_data or {}),
+            self._relative_section(beta_data or {}, mrs_data or {}),
+            self._trend_indicators_section(
+                adx_data or {}, supertrend_data or {}, pattern_data or {}),
+            self._seasonality_section(monthly_data or {}, dow_data or {}),
+            self._signal_confluence_section(
+                hmm_data or {}, rsi_data, macd_data,
+                adx_data or {}, supertrend_data or {},
+                mrs_data or {}, hurst_data or {},
+            ),
             self._charts_section(chart_paths or {}),
             self._footer(),
         ]
@@ -335,18 +357,370 @@ fundamental research for investment decisions.*
 
         return "\n".join(lines)
 
+    # ── Advanced Statistics ──
+    def _advanced_stats_section(self, hmm: dict, hurst: dict, acf: dict) -> str:
+        lines = ["## 6. Advanced Statistical Analysis"]
+
+        if hmm.get("available"):
+            lines += [
+                "",
+                "### HMM Regime Detection",
+                f"| Current Regime | **{hmm.get('current_regime_label', 'N/A')}** |",
+                "",
+                "| Regime | Avg Daily Return | Avg 5d Volatility |",
+                "| :--- | ---: | ---: |",
+            ]
+            for r in hmm.get("regimes", []):
+                lines.append(
+                    f"| {r.get('label', '?')} | "
+                    f"{_fmt(r.get('avg_daily_return_pct'), 3, True)} | "
+                    f"{_fmt(r.get('avg_5d_vol_pct'), 3, True)} |"
+                )
+        else:
+            lines.append("\n*HMM regime detection unavailable.*")
+
+        if hurst.get("available"):
+            lines += [
+                "",
+                "### Hurst Exponent",
+                "| Metric | Value |",
+                "| :--- | ---: |",
+                _row("Hurst Exponent", hurst.get("hurst"), 4),
+                f"| Interpretation | **{hurst.get('interpretation', 'N/A')}** |",
+                f"| Implication | {hurst.get('implication', 'N/A')} |",
+            ]
+
+        if acf.get("available"):
+            sig_lags = acf.get("significant_acf_lags", [])
+            persistence = acf.get("momentum_persistence", "N/A")
+            lines += [
+                "",
+                "### ACF / PACF Analysis",
+                f"| Momentum Persistence | **{persistence}** |",
+                f"| Significant ACF Lags | {', '.join(str(l) for l in sig_lags[:8]) or 'None'} |",
+            ]
+
+        return "\n".join(lines)
+
+    # ── Relative & Benchmark Analysis ──
+    def _relative_section(self, beta: dict, mrs: dict) -> str:
+        lines = ["## 7. Relative & Benchmark Analysis"]
+
+        if beta.get("available"):
+            lines += [
+                "",
+                "### Rolling Beta & Correlation vs Nifty 50",
+                "| Metric | Value |",
+                "| :--- | ---: |",
+                _row("Current Beta", beta.get("current_beta")),
+                _row("Average Beta", beta.get("avg_beta")),
+                _row("Current Correlation", beta.get("current_correlation")),
+                _row("Average Correlation", beta.get("avg_correlation")),
+                f"| Window | {beta.get('window', 63)} trading days |",
+            ]
+        else:
+            lines.append("\n*Benchmark data unavailable for relative analysis.*")
+
+        if mrs.get("available"):
+            lines += [
+                "",
+                "### Mansfield Relative Strength",
+                "| Metric | Value |",
+                "| :--- | ---: |",
+                _row("Current MRS", mrs.get("current_mrs"), 4),
+                f"| Interpretation | **{mrs.get('interpretation', 'N/A')}** |",
+            ]
+
+        return "\n".join(lines)
+
+    # ── Trend Indicators ──
+    def _trend_indicators_section(
+        self, adx: dict, st: dict, patterns: dict
+    ) -> str:
+        lines = ["## 8. Trend Quality & Advanced Indicators"]
+
+        if adx.get("available"):
+            lines += [
+                "",
+                "### ADX & Directional Movement Index",
+                "| Metric | Value |",
+                "| :--- | ---: |",
+                _row("ADX", adx.get("current_adx")),
+                _row("+DI", adx.get("current_plus_di")),
+                _row("-DI", adx.get("current_minus_di")),
+                f"| Trend Strength | **{adx.get('trend_strength', 'N/A')}** |",
+                f"| Directional Bias | **{adx.get('directional_bias', 'N/A')}** |",
+            ]
+
+        if st.get("available"):
+            lines += [
+                "",
+                "### Supertrend",
+                "| Metric | Value |",
+                "| :--- | ---: |",
+                _row("Supertrend", st.get("current_supertrend"), prefix="₹"),
+                f"| Direction | **{st.get('current_direction', 'N/A')}** |",
+            ]
+
+        if patterns.get("available", False) and patterns.get("count", 0) > 0:
+            lines += [
+                "",
+                "### Candlestick Patterns (last 5 bars)",
+                "| Pattern | Date | Signal | Strength |",
+                "| :--- | :--- | :--- | :--- |",
+            ]
+            for p in patterns.get("patterns_found", [])[:10]:
+                lines.append(
+                    f"| {p.get('pattern', '')} | {p.get('date', '')} | "
+                    f"{p.get('signal', '')} | {p.get('strength', '')} |"
+                )
+        elif not patterns.get("available", True):
+            lines.append("\n*Candlestick pattern recognition unavailable (TA-Lib required).*")
+        else:
+            lines.append("\n*No significant candlestick patterns detected in recent bars.*")
+
+        return "\n".join(lines)
+
+    # ── Seasonality ──
+    def _seasonality_section(self, monthly: dict, dow: dict) -> str:
+        lines = ["## 9. Seasonality & Cycle Analysis"]
+
+        if monthly.get("available"):
+            lines += [
+                "",
+                "### Monthly Return Profile",
+                f"| Best Month | **{monthly.get('best_month', 'N/A')}** "
+                f"(avg {_fmt(monthly.get('best_month_avg_pct'), 2, True)}) |",
+                f"| Worst Month | **{monthly.get('worst_month', 'N/A')}** "
+                f"(avg {_fmt(monthly.get('worst_month_avg_pct'), 2, True)}) |",
+            ]
+        else:
+            lines.append("\n*Insufficient data for monthly seasonality.*")
+
+        if dow.get("available"):
+            lines += [
+                "",
+                "### Day-of-Week Effect",
+                "| Day | Avg Return | Std Dev | Count |",
+                "| :--- | ---: | ---: | ---: |",
+            ]
+            for day_name, stats in dow.get("day_returns", {}).items():
+                cnt = stats.get('count', 0)
+                cnt_str = str(int(cnt)) if cnt == int(cnt) else str(cnt)
+                lines.append(
+                    f"| {day_name} | "
+                    f"{_fmt(stats.get('avg_return_pct'), 4, True)} | "
+                    f"{_fmt(stats.get('std_pct'), 4, True)} | "
+                    f"{cnt_str} |"
+                )
+            lines += [
+                "",
+                f"| Best Day | **{dow.get('best_day', 'N/A')}** "
+                f"(avg {_fmt(dow.get('best_day_avg_pct'), 4, True)}) |",
+                f"| Worst Day | **{dow.get('worst_day', 'N/A')}** "
+                f"(avg {_fmt(dow.get('worst_day_avg_pct'), 4, True)}) |",
+            ]
+
+        return "\n".join(lines)
+
+    # ── Signal Confluence ──
+    def _signal_confluence_section(
+        self, hmm: dict, rsi: dict, macd: dict,
+        adx: dict, st: dict, mrs: dict, hurst: dict,
+    ) -> str:
+        """Synthesise all directional signals into a confluence table
+        and flag any significant divergences between indicators."""
+        lines = ["## 10. Signal Confluence & Divergence Analysis"]
+
+        # ── Collect individual signal votes ──
+        signals: list[tuple[str, str, str]] = []  # (source, bias, value)
+
+        # HMM regime
+        if hmm.get("available"):
+            lbl = hmm.get("current_regime_label", "")
+            if "bull" in lbl.lower():
+                signals.append(("HMM Regime", "BULLISH", lbl))
+            elif "bear" in lbl.lower():
+                signals.append(("HMM Regime", "BEARISH", lbl))
+            else:
+                signals.append(("HMM Regime", "NEUTRAL", lbl))
+
+        # RSI
+        if rsi and rsi.get("available"):
+            cur_rsi = rsi.get("current_rsi")
+            if cur_rsi is not None:
+                if cur_rsi >= 70:
+                    signals.append(("RSI (14)", "BEARISH", f"{cur_rsi:.1f} (overbought)"))
+                elif cur_rsi <= 30:
+                    signals.append(("RSI (14)", "BULLISH", f"{cur_rsi:.1f} (oversold)"))
+                elif cur_rsi >= 50:
+                    signals.append(("RSI (14)", "BULLISH", f"{cur_rsi:.1f}"))
+                else:
+                    signals.append(("RSI (14)", "BEARISH", f"{cur_rsi:.1f}"))
+
+        # MACD crossover
+        if macd and macd.get("available"):
+            xo = macd.get("crossover", "").upper()
+            if "BULLISH" in xo:
+                signals.append(("MACD Crossover", "BULLISH", xo))
+            elif "BEARISH" in xo:
+                signals.append(("MACD Crossover", "BEARISH", xo))
+            else:
+                signals.append(("MACD Crossover", "NEUTRAL", xo or "N/A"))
+
+        # ADX / DMI directional bias
+        if adx.get("available"):
+            bias = adx.get("directional_bias", "").upper()
+            adx_val = adx.get("current_adx", 0)
+            strength = adx.get("trend_strength", "")
+            if "BULLISH" in bias:
+                signals.append(("DMI Directional", "BULLISH",
+                                f"+DI > -DI | ADX {adx_val:.1f} ({strength})"))
+            elif "BEARISH" in bias:
+                signals.append(("DMI Directional", "BEARISH",
+                                f"-DI > +DI | ADX {adx_val:.1f} ({strength})"))
+            else:
+                signals.append(("DMI Directional", "NEUTRAL",
+                                f"ADX {adx_val:.1f} ({strength})"))
+
+        # Supertrend
+        if st.get("available"):
+            direction = st.get("current_direction", "").upper()
+            st_val = st.get("current_supertrend", 0)
+            if "BULLISH" in direction:
+                signals.append(("Supertrend", "BULLISH", f"₹{st_val:,.2f}"))
+            elif "BEARISH" in direction:
+                signals.append(("Supertrend", "BEARISH", f"₹{st_val:,.2f}"))
+
+        # Mansfield RS
+        if mrs.get("available"):
+            interp = mrs.get("interpretation", "").upper()
+            mrs_val = mrs.get("current_mrs", 0)
+            if "OUTPERFORMING" in interp:
+                signals.append(("Mansfield RS", "BULLISH",
+                                f"{mrs_val:.2f} ({interp})"))
+            elif "UNDERPERFORMING" in interp:
+                signals.append(("Mansfield RS", "BEARISH",
+                                f"{mrs_val:.2f} ({interp})"))
+
+        if not signals:
+            lines.append("\n*Insufficient indicator data for confluence analysis.*")
+            return "\n".join(lines)
+
+        # ── Build confluence table ──
+        lines += [
+            "",
+            "### Indicator Signal Table",
+            "| Indicator | Bias | Detail |",
+            "| :--- | :---: | :--- |",
+        ]
+        bull_count = 0
+        bear_count = 0
+        for src, bias, detail in signals:
+            emoji = "🟢" if bias == "BULLISH" else ("🔴" if bias == "BEARISH" else "⚪")
+            lines.append(f"| {src} | {emoji} **{bias}** | {detail} |")
+            if bias == "BULLISH":
+                bull_count += 1
+            elif bias == "BEARISH":
+                bear_count += 1
+
+        total = len(signals)
+        lines += [
+            "",
+            "### Confluence Summary",
+            "| Metric | Value |",
+            "| :--- | ---: |",
+            f"| Bullish Signals | {bull_count} / {total} |",
+            f"| Bearish Signals | {bear_count} / {total} |",
+            f"| Neutral Signals | {total - bull_count - bear_count} / {total} |",
+        ]
+
+        # Net bias
+        if bull_count > bear_count + 1:
+            net = "NET BULLISH"
+        elif bear_count > bull_count + 1:
+            net = "NET BEARISH"
+        elif bull_count == bear_count:
+            net = "MIXED / NO CLEAR BIAS"
+        else:
+            net = "MARGINALLY " + ("BULLISH" if bull_count > bear_count else "BEARISH")
+        lines.append(f"| **Overall Bias** | **{net}** |")
+
+        # ── Divergence warnings ──
+        divergences: list[str] = []
+
+        # Check Supertrend vs majority
+        st_sig = next((b for s, b, _ in signals if s == "Supertrend"), None)
+        majority = "BULLISH" if bull_count > bear_count else (
+            "BEARISH" if bear_count > bull_count else None)
+        if st_sig and majority and st_sig != majority:
+            others = ", ".join(
+                f"{s} ({b})" for s, b, _ in signals
+                if s != "Supertrend" and b == majority
+            )
+            divergences.append(
+                f"**Supertrend ({st_sig})** diverges from the majority bias "
+                f"({majority}): {others}. The Supertrend may be reacting to a "
+                f"short-term bounce within a larger downtrend — wait for "
+                f"confirmation before acting on the Supertrend alone."
+            )
+
+        # Check HMM vs Supertrend specifically
+        hmm_sig = next((b for s, b, _ in signals if s == "HMM Regime"), None)
+        if hmm_sig and st_sig and hmm_sig != st_sig and hmm_sig != "NEUTRAL":
+            divergences.append(
+                f"**HMM Regime ({hmm_sig})** conflicts with **Supertrend ({st_sig})**. "
+                f"The HMM captures the broader statistical regime while Supertrend "
+                f"tracks short-term ATR-based trend — regime context should take "
+                f"precedence for position sizing."
+            )
+
+        # Hurst implication
+        if hurst.get("available"):
+            h_val = hurst.get("hurst", 0.5)
+            interp = hurst.get("interpretation", "")
+            if h_val and h_val > 0.55:
+                divergences.append(
+                    f"Hurst exponent ({h_val:.4f}) indicates **{interp}** — "
+                    f"the current directional trend is statistically likely to "
+                    f"persist. Signals aligned with the dominant regime carry "
+                    f"higher conviction."
+                )
+            elif h_val and h_val < 0.45:
+                divergences.append(
+                    f"Hurst exponent ({h_val:.4f}) indicates **{interp}** — "
+                    f"the price is statistically likely to revert. Breakout "
+                    f"signals (Supertrend, MACD) may generate more false positives."
+                )
+
+        if divergences:
+            lines += ["", "### Divergence Alerts"]
+            for i, d in enumerate(divergences, 1):
+                lines.append(f"\n{i}. {d}")
+        else:
+            lines += ["", "*No significant signal divergences detected — indicators are aligned.*"]
+
+        return "\n".join(lines)
+
     # ── Charts ──
     def _charts_section(self, chart_paths: dict[str, str]) -> str:
         if not chart_paths:
-            return "## 6. Charts\n\n*No charts generated.*"
+            return "## 11. Charts\n\n*No charts generated.*"
 
-        lines = ["## 6. Charts", ""]
+        lines = ["## 11. Charts", ""]
         chart_labels = {
             "candlestick": "Candlestick with S/R & VWAP",
             "volume_profile": "Volume Profile (VPVR)",
             "momentum": "Momentum Dashboard (RSI / MACD / Bollinger %B)",
             "risk_panel": "Risk & Volatility Panel",
             "summary": "Summary Dashboard",
+            "acf_pacf": "ACF / PACF Correlogram",
+            "rolling_beta": "Rolling Beta & Correlation vs Nifty 50",
+            "mansfield_rs": "Mansfield Relative Strength",
+            "adx_dmi": "ADX & Directional Movement Index",
+            "supertrend": "Supertrend Overlay",
+            "monthly_heatmap": "Monthly Return Heatmap",
+            "day_of_week": "Day-of-Week Effect",
         }
         for key, path in chart_paths.items():
             label = chart_labels.get(key, key)

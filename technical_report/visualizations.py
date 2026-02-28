@@ -639,6 +639,414 @@ class TechnicalVisualizer:
         return self._save(fig, "summary_dashboard", height=1100)
 
     # ==================================================================
+    # 6. ACF / PACF Correlogram
+    # ==================================================================
+    def acf_pacf_chart(self, acf_data: dict) -> str:
+        if not acf_data.get("available"):
+            return ""
+
+        acf_vals = acf_data.get("_acf")
+        pacf_vals = acf_data.get("_pacf")
+        if acf_vals is None or pacf_vals is None:
+            return ""
+
+        n_lags = len(acf_vals) - 1  # skip lag-0
+        lags = list(range(1, n_lags + 1))
+        acf_v = list(acf_vals[1:])
+        pacf_v = list(pacf_vals[1:])
+
+        # Approximate 95 % confidence band
+        n_obs = acf_data.get("_n_obs", 250)
+        ci = 1.96 / (n_obs ** 0.5)
+
+        fig = make_subplots(
+            rows=2, cols=1, shared_xaxes=True,
+            vertical_spacing=0.10,
+            subplot_titles=["Autocorrelation (ACF)", "Partial Autocorrelation (PACF)"],
+        )
+
+        for row, vals, label in [(1, acf_v, "ACF"), (2, pacf_v, "PACF")]:
+            colors = [_P["blue"] if abs(v) > ci else _P["grey"] for v in vals]
+            fig.add_trace(go.Bar(
+                x=lags, y=vals, marker_color=colors,
+                name=label, showlegend=False,
+            ), row=row, col=1)
+            fig.add_hline(y=ci, line_color=_P["red"], line_dash="dash",
+                          line_width=0.8, row=row, col=1,
+                          annotation_text="95% CI",
+                          annotation_position="right",
+                          annotation_font=dict(size=9, color=_P["red"]))
+            fig.add_hline(y=-ci, line_color=_P["red"], line_dash="dash",
+                          line_width=0.8, row=row, col=1)
+            fig.add_hline(y=0, line_color=_P["grey"], line_width=0.4,
+                          row=row, col=1)
+
+        fig.update_layout(
+            **_dark_layout(
+                title=dict(text=f"{self.symbol} — ACF / PACF Correlogram",
+                           x=0.5, font=dict(size=15)),
+                height=800,
+            ),
+        )
+        fig.update_xaxes(title_text="Lag", row=2, col=1, dtick=5,
+                         gridcolor=_P["grid"])
+        fig.update_yaxes(title_text="ACF", gridcolor=_P["grid"], row=1, col=1)
+        fig.update_yaxes(title_text="PACF", gridcolor=_P["grid"], row=2, col=1)
+
+        return self._save(fig, "acf_pacf", height=800)
+
+    # ==================================================================
+    # 7. Rolling Beta & Correlation vs Benchmark
+    # ==================================================================
+    def rolling_beta_chart(self, beta_data: dict) -> str:
+        if not beta_data.get("available"):
+            return ""
+
+        beta_s = beta_data.get("_beta_series")
+        corr_s = beta_data.get("_correlation_series")
+        if beta_s is None or corr_s is None:
+            return ""
+
+        fig = make_subplots(
+            rows=2, cols=1, shared_xaxes=True,
+            vertical_spacing=0.08,
+            subplot_titles=["Rolling Beta vs Nifty 50", "Rolling Correlation"],
+        )
+
+        fig.add_trace(go.Scatter(
+            x=beta_s.index, y=beta_s.values, mode="lines",
+            line=dict(color=_P["blue"], width=1.4), name="Beta",
+            showlegend=False,
+        ), row=1, col=1)
+        fig.add_hline(y=1.0, line_color=_P["grey"], line_dash="dash",
+                      line_width=0.7, row=1, col=1,
+                      annotation_text="β = 1.0",
+                      annotation_position="right",
+                      annotation_font=dict(size=9, color=_P["grey"]))
+        last_beta = beta_s.dropna().iloc[-1] if len(beta_s.dropna()) else None
+        if last_beta is not None:
+            fig.add_annotation(
+                x=beta_s.dropna().index[-1], y=last_beta,
+                text=f"  β = {last_beta:.2f}",
+                showarrow=False, font=dict(size=12, color=_P["blue"],
+                                           family="Arial Black"),
+                xanchor="left", row=1, col=1)
+
+        fig.add_trace(go.Scatter(
+            x=corr_s.index, y=corr_s.values, mode="lines",
+            line=dict(color=_P["cyan"], width=1.4), name="Correlation",
+            showlegend=False,
+        ), row=2, col=1)
+        fig.add_hline(y=0, line_color=_P["grey"], line_width=0.4, row=2, col=1)
+        last_corr = corr_s.dropna().iloc[-1] if len(corr_s.dropna()) else None
+        if last_corr is not None:
+            fig.add_annotation(
+                x=corr_s.dropna().index[-1], y=last_corr,
+                text=f"  r = {last_corr:.2f}",
+                showarrow=False, font=dict(size=12, color=_P["cyan"],
+                                           family="Arial Black"),
+                xanchor="left", row=2, col=1)
+
+        fig.update_layout(
+            **_dark_layout(
+                title=dict(text=f"{self.symbol} — Rolling Beta & Correlation vs Nifty 50",
+                           x=0.5, font=dict(size=15)),
+                height=800,
+            ),
+        )
+        fig.update_yaxes(title_text="Beta", gridcolor=_P["grid"], row=1, col=1)
+        fig.update_yaxes(title_text="Correlation", gridcolor=_P["grid"],
+                         range=[-1, 1], row=2, col=1)
+        fig.update_xaxes(tickformat="%b '%y", gridcolor=_P["grid"], row=2, col=1)
+
+        return self._save(fig, "rolling_beta", height=800)
+
+    # ==================================================================
+    # 8. Mansfield Relative Strength
+    # ==================================================================
+    def mansfield_rs_chart(self, mrs_data: dict, close: pd.Series) -> str:
+        if not mrs_data.get("available"):
+            return ""
+
+        mrs_s = mrs_data.get("_mrs_series")
+        if mrs_s is None:
+            return ""
+
+        fig = make_subplots(
+            rows=2, cols=1, shared_xaxes=True,
+            row_heights=[0.55, 0.45], vertical_spacing=0.06,
+            subplot_titles=["Price", "Mansfield Relative Strength"],
+        )
+
+        # Price panel
+        fig.add_trace(go.Scatter(
+            x=close.index, y=close.values, mode="lines",
+            line=dict(color=_P["blue"], width=1.3), name="Close",
+            showlegend=False,
+        ), row=1, col=1)
+
+        # MRS panel
+        fig.add_trace(go.Scatter(
+            x=mrs_s.index, y=mrs_s.values, mode="lines",
+            line=dict(color=_P["orange"], width=1.5), name="MRS",
+            showlegend=False,
+        ), row=2, col=1)
+        fig.add_hline(y=0, line_color=_P["grey"], line_dash="dash",
+                      line_width=0.7, row=2, col=1,
+                      annotation_text="Zero line (benchmark)",
+                      annotation_position="right",
+                      annotation_font=dict(size=9, color=_P["grey"]))
+
+        # Shade positive vs negative
+        fig.add_trace(go.Scatter(
+            x=mrs_s.index, y=mrs_s.clip(lower=0).values,
+            fill="tozeroy", fillcolor="rgba(38,166,154,0.15)",
+            line=dict(width=0), showlegend=False, hoverinfo="skip",
+        ), row=2, col=1)
+        fig.add_trace(go.Scatter(
+            x=mrs_s.index, y=mrs_s.clip(upper=0).values,
+            fill="tozeroy", fillcolor="rgba(239,83,80,0.15)",
+            line=dict(width=0), showlegend=False, hoverinfo="skip",
+        ), row=2, col=1)
+
+        fig.update_layout(
+            **_dark_layout(
+                title=dict(text=f"{self.symbol} — Mansfield Relative Strength vs Nifty 50",
+                           x=0.5, font=dict(size=15)),
+                height=800,
+            ),
+        )
+        fig.update_yaxes(title_text="Price", tickprefix="₹", tickformat=",.0f",
+                         gridcolor=_P["grid"], row=1, col=1)
+        fig.update_yaxes(title_text="MRS", gridcolor=_P["grid"], row=2, col=1)
+        fig.update_xaxes(tickformat="%b '%y", gridcolor=_P["grid"], row=2, col=1)
+
+        return self._save(fig, "mansfield_rs", height=800)
+
+    # ==================================================================
+    # 9. ADX / DMI Panel
+    # ==================================================================
+    def adx_dmi_chart(self, adx_data: dict, lookback: int = 180) -> str:
+        if not adx_data.get("available"):
+            return ""
+
+        adx_s = adx_data.get("_adx_series")
+        pdi = adx_data.get("_plus_di_series")
+        mdi = adx_data.get("_minus_di_series")
+        if adx_s is None or pdi is None or mdi is None:
+            return ""
+
+        recent = slice(-lookback, None)
+        adx_s = adx_s.iloc[recent]
+        pdi = pdi.iloc[recent]
+        mdi = mdi.iloc[recent]
+
+        fig = go.Figure()
+
+        fig.add_trace(go.Scatter(
+            x=adx_s.index, y=adx_s.values, mode="lines",
+            line=dict(color=_P["yellow"], width=2), name="ADX",
+        ))
+        fig.add_trace(go.Scatter(
+            x=pdi.index, y=pdi.values, mode="lines",
+            line=dict(color=_P["green"], width=1.3), name="+DI",
+        ))
+        fig.add_trace(go.Scatter(
+            x=mdi.index, y=mdi.values, mode="lines",
+            line=dict(color=_P["red"], width=1.3), name="-DI",
+        ))
+
+        # Trend strength thresholds
+        fig.add_hline(y=25, line_color=_P["grey"], line_dash="dash",
+                      line_width=0.7,
+                      annotation_text="Strong trend (25)",
+                      annotation_position="right",
+                      annotation_font=dict(size=9, color=_P["grey"]))
+        fig.add_hline(y=40, line_color=_P["grey"], line_dash="dot",
+                      line_width=0.5,
+                      annotation_text="Very strong (40)",
+                      annotation_position="right",
+                      annotation_font=dict(size=9, color=_P["grey"]))
+
+        # Last ADX annotation
+        last_adx = adx_s.dropna().iloc[-1] if len(adx_s.dropna()) else None
+        if last_adx is not None:
+            fig.add_annotation(
+                x=adx_s.dropna().index[-1], y=last_adx,
+                text=f"  ADX: {last_adx:.1f}",
+                showarrow=False,
+                font=dict(size=12, color=_P["yellow"], family="Arial Black"),
+                xanchor="left")
+
+        fig.update_layout(
+            **_dark_layout(
+                title=dict(text=f"{self.symbol} — ADX & DMI",
+                           x=0.5, font=dict(size=15)),
+                height=600,
+            ),
+        )
+        fig.update_yaxes(title_text="Value", gridcolor=_P["grid"],
+                         range=[0, max(70, float(adx_s.max()) + 5)])
+        fig.update_xaxes(tickformat="%b '%y", gridcolor=_P["grid"])
+
+        return self._save(fig, "adx_dmi", height=600)
+
+    # ==================================================================
+    # 10. Supertrend Overlay
+    # ==================================================================
+    def supertrend_chart(
+        self, df: pd.DataFrame, st_data: dict, lookback: int = 180
+    ) -> str:
+        if not st_data.get("available"):
+            return ""
+
+        st_series = st_data.get("_supertrend_series")
+        dir_series = st_data.get("_direction_series")
+        if st_series is None or dir_series is None:
+            return ""
+
+        chart_df = df.tail(lookback).copy()
+        close = chart_df["close"] if "close" in chart_df.columns else chart_df.get("Close")
+        if close is None:
+            return ""
+
+        st_s = st_series.reindex(chart_df.index).dropna()
+        dir_s = dir_series.reindex(chart_df.index).dropna()
+
+        fig = go.Figure()
+
+        # Price line
+        fig.add_trace(go.Scatter(
+            x=close.index, y=close.values, mode="lines",
+            line=dict(color=_P["blue"], width=1.5), name="Close",
+        ))
+
+        # Supertrend — green when bullish, red when bearish
+        bullish_mask = dir_s == 1
+        bearish_mask = dir_s == -1
+
+        common_idx = st_s.index.intersection(dir_s.index)
+        st_aligned = st_s.loc[common_idx]
+        dir_aligned = dir_s.loc[common_idx]
+
+        bull_st = st_aligned.where(dir_aligned == 1)
+        bear_st = st_aligned.where(dir_aligned == -1)
+
+        fig.add_trace(go.Scatter(
+            x=bull_st.index, y=bull_st.values, mode="lines",
+            line=dict(color=_P["green"], width=1.8),
+            name="Supertrend (Bull)", connectgaps=False,
+        ))
+        fig.add_trace(go.Scatter(
+            x=bear_st.index, y=bear_st.values, mode="lines",
+            line=dict(color=_P["red"], width=1.8),
+            name="Supertrend (Bear)", connectgaps=False,
+        ))
+
+        fig.update_layout(
+            **_dark_layout(
+                title=dict(text=f"{self.symbol} — Supertrend Overlay",
+                           x=0.5, font=dict(size=15)),
+                height=700,
+            ),
+        )
+        fig.update_yaxes(title_text="Price", tickprefix="₹", tickformat=",.0f",
+                         gridcolor=_P["grid"])
+        fig.update_xaxes(tickformat="%b '%y", gridcolor=_P["grid"])
+
+        return self._save(fig, "supertrend", height=700)
+
+    # ==================================================================
+    # 11. Monthly Return Heatmap
+    # ==================================================================
+    def monthly_heatmap_chart(self, season_data: dict) -> str:
+        if not season_data.get("available"):
+            return ""
+
+        heatmap_df = season_data.get("_heatmap_df")
+        if heatmap_df is None or heatmap_df.empty:
+            return ""
+
+        # Fill NaN with 0 for display
+        hm = heatmap_df.fillna(float("nan"))
+
+        # Colour scale: red for negative, green for positive
+        fig = go.Figure(data=go.Heatmap(
+            z=hm.values,
+            x=hm.columns.tolist(),
+            y=[str(y) for y in hm.index.tolist()],
+            colorscale=[
+                [0.0, "#ef5350"],
+                [0.5, "#1a1d23"],
+                [1.0, "#26a69a"],
+            ],
+            zmid=0,
+            text=[[f"{v:.1f}%" if not np.isnan(v) else ""
+                   for v in row] for row in hm.values],
+            texttemplate="%{text}",
+            textfont=dict(size=11, color=_P["text"]),
+            hovertemplate="Year: %{y}<br>Month: %{x}<br>Return: %{z:.2f}%<extra></extra>",
+            colorbar=dict(
+                title="Return %",
+                ticksuffix="%",
+                len=0.75,
+            ),
+        ))
+
+        fig.update_layout(
+            **_dark_layout(
+                title=dict(text=f"{self.symbol} — Monthly Return Heatmap",
+                           x=0.5, font=dict(size=15)),
+                height=max(400, 120 + len(hm) * 40),
+            ),
+        )
+        fig.update_xaxes(side="top", tickangle=0)
+        fig.update_yaxes(autorange="reversed")
+
+        return self._save(fig, "monthly_heatmap",
+                          height=max(400, 120 + len(hm) * 40))
+
+    # ==================================================================
+    # 12. Day-of-Week Effect
+    # ==================================================================
+    def day_of_week_chart(self, dow_data: dict) -> str:
+        if not dow_data.get("available"):
+            return ""
+
+        grouped = dow_data.get("_grouped_df")
+        if grouped is None or grouped.empty:
+            return ""
+
+        days = grouped.index.tolist()
+        avgs = grouped["avg_return_pct"].values
+        stds = grouped["std_pct"].values
+
+        colors = [_P["green"] if v >= 0 else _P["red"] for v in avgs]
+
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            x=days, y=avgs,
+            marker_color=colors, opacity=0.85,
+            error_y=dict(type="data", array=stds, visible=True,
+                         color=_P["grey"], thickness=1.2),
+            name="Avg Return",
+        ))
+        fig.add_hline(y=0, line_color=_P["grey"], line_width=0.5)
+
+        fig.update_layout(
+            **_dark_layout(
+                title=dict(text=f"{self.symbol} — Day-of-Week Effect",
+                           x=0.5, font=dict(size=15)),
+                height=500,
+            ),
+        )
+        fig.update_yaxes(title_text="Avg Daily Return (%)",
+                         gridcolor=_P["grid"], ticksuffix="%")
+        fig.update_xaxes(gridcolor=_P["grid"])
+
+        return self._save(fig, "day_of_week", height=500)
+
+    # ==================================================================
     # Generate ALL charts
     # ==================================================================
     def generate_all(
@@ -652,6 +1060,14 @@ class TechnicalVisualizer:
         rsi_data: dict,
         macd_data: dict,
         boll_data: dict,
+        # ── new data dicts ──
+        acf_data: dict | None = None,
+        beta_data: dict | None = None,
+        mrs_data: dict | None = None,
+        adx_data: dict | None = None,
+        supertrend_data: dict | None = None,
+        monthly_data: dict | None = None,
+        dow_data: dict | None = None,
     ) -> dict[str, str]:
         close = df["close"] if "close" in df.columns else df.get("Close")
         if close is None:
@@ -680,6 +1096,14 @@ class TechnicalVisualizer:
             ("risk_panel", lambda: self.risk_panel(close, risk_metrics, vol_model)),
             ("summary", lambda: self.summary_dashboard(
                 df, risk_metrics, vol_model, vpvr_data, price_levels)),
+            # ── NEW charts ──
+            ("acf_pacf", lambda: self.acf_pacf_chart(acf_data or {})),
+            ("rolling_beta", lambda: self.rolling_beta_chart(beta_data or {})),
+            ("mansfield_rs", lambda: self.mansfield_rs_chart(mrs_data or {}, close)),
+            ("adx_dmi", lambda: self.adx_dmi_chart(adx_data or {})),
+            ("supertrend", lambda: self.supertrend_chart(df, supertrend_data or {})),
+            ("monthly_heatmap", lambda: self.monthly_heatmap_chart(monthly_data or {})),
+            ("day_of_week", lambda: self.day_of_week_chart(dow_data or {})),
         ]:
             try:
                 p = fn()

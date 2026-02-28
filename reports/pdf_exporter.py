@@ -421,16 +421,24 @@ def export_markdown_to_pdf(md_filepath: str, symbol: str,
             pdf_obj._font('', font_size)
 
             # Measure natural (unwrapped) width per column
+            # Also measure with bold font for headers
             col_natural = [0.0] * num_cols
-            for row in all_rows:
+            for fi, row in enumerate(all_rows):
+                is_hdr = (fi == 0 and header_cells)
+                if is_hdr:
+                    pdf_obj._font('B', font_size)
+                else:
+                    pdf_obj._font('', font_size)
                 for ci in range(num_cols):
                     if ci < len(row):
                         txt = _strip_md(clean(row[ci]))
                         w = pdf_obj.get_string_width(txt) + cell_pad * 2
                         col_natural[ci] = max(col_natural[ci], w)
+            pdf_obj._font('', font_size)  # reset
 
-            # Ensure a reasonable minimum per column
-            col_min = max(22, page_w / num_cols * 0.3)
+            # Ensure a reasonable minimum per column — small enough
+            # to preserve natural width proportions between columns
+            col_min = max(10, page_w / num_cols * 0.12)
             col_widths = [max(w, col_min) for w in col_natural]
 
             total = sum(col_widths)
@@ -439,10 +447,24 @@ def export_markdown_to_pdf(md_filepath: str, symbol: str,
                 scale = page_w / total
                 col_widths = [w * scale for w in col_widths]
             elif total < page_w:
-                # Distribute surplus proportionally
+                # Distribute surplus proportionally, but cap each
+                # column at 3x its natural width so narrow-content
+                # tables keep visually compact, readable columns.
                 surplus = page_w - total
+                bonus = [surplus * (col_widths[ci] / total)
+                         for ci in range(num_cols)]
+                cap = 3.0  # max expansion factor
                 for ci in range(num_cols):
-                    col_widths[ci] += surplus * (col_widths[ci] / total)
+                    max_extra = col_widths[ci] * (cap - 1)
+                    bonus[ci] = min(bonus[ci], max_extra)
+                distributed = sum(bonus)
+                # Give any leftover to the widest natural column
+                if distributed < surplus:
+                    widest = max(range(num_cols),
+                                 key=lambda i: col_natural[i])
+                    bonus[widest] += surplus - distributed
+                for ci in range(num_cols):
+                    col_widths[ci] += bonus[ci]
 
             # ── Post-scale: enforce minimum width per widest word ─
             # Prevents short words (e.g. "PASS") from wrapping in
@@ -504,31 +526,37 @@ def export_markdown_to_pdf(md_filepath: str, symbol: str,
                         pdf_obj._font('B', font_size)
                     else:
                         pdf_obj._font('', font_size)
+                    cw = col_widths[ci] - cell_pad * 2
+                    tw = pdf_obj.get_string_width(txt)
                     try:
-                        pdf_obj.multi_cell(
-                            col_widths[ci] - cell_pad * 2, line_h,
-                            txt, border=0, align=align)
+                        if tw <= cw or ' ' not in txt:
+                            # Single-line: use cell() for precise alignment
+                            pdf_obj.cell(cw, line_h, txt, border=0,
+                                         align=align)
+                        else:
+                            # Multi-line: word-wrap with multi_cell()
+                            pdf_obj.multi_cell(cw, line_h, txt,
+                                               border=0, align=align)
                     except Exception:
                         try:
-                            pdf_obj.multi_cell(
-                                col_widths[ci] - cell_pad * 2, line_h,
-                                txt[:60], border=0, align=align)
+                            pdf_obj.cell(cw, line_h, txt[:60],
+                                         border=0, align=align)
                         except Exception:
                             pass
 
                 pdf_obj.set_xy(x0, y0 + rh)
 
             # ── 3. Render header ─────────────────────────────────
-            pdf_obj.set_draw_color(180, 185, 190)
+            pdf_obj.set_draw_color(150, 155, 165)
             if header_cells:
                 rh = _row_height(header_cells)
                 _draw_row(header_cells, rh, bold=True,
-                          fill_color=(230, 235, 240))
+                          fill_color=(220, 225, 235))
 
             # ── 4. Render data rows ──────────────────────────────
             for ri, row in enumerate(data_rows):
                 rh = _row_height(row)
-                fill = (250, 251, 252) if ri % 2 else (255, 255, 255)
+                fill = (240, 242, 248) if ri % 2 else (255, 255, 255)
                 _draw_row(row, rh, bold=False, fill_color=fill)
 
             pdf_obj.ln(3)  # spacing after table
