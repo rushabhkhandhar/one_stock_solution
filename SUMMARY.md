@@ -747,6 +747,10 @@ python main.py AXISCADES
 python main.py --symbols "RELIANCE,TCS,HDFCBANK"
 python main.py --watchlist-file watchlist.txt
 
+# 3b. Daily watchlist drift + triggered alerts + rerun comparison
+# (generated automatically after each batch run)
+# Run at least once daily for drift snapshots.
+
 # 4. Rule-based stock screener
 python main.py --symbols "RELIANCE,TCS,HDFCBANK" --screen-rules "pe_ratio<=25,roe>=12,f_score>=6"
 python main.py --watchlist-file watchlist.txt --screen-rules-file rules.txt
@@ -760,6 +764,10 @@ python main.py --watchlist-file watchlist.txt --screen-rules-file rules.txt --ra
 # → output/watchlist_batch_summary_<TIMESTAMP>.csv
 # → output/screener_results_<TIMESTAMP>.csv
 # → output/portfolio_scorecard_<TIMESTAMP>.csv
+# → output/watchlist_drift_<TIMESTAMP>.csv
+# → output/watchlist_alerts_<TIMESTAMP>.csv
+# → output/rerun_comparison_<TIMESTAMP>.csv
+# → output/history/<SYMBOL>_Research_<TIMESTAMP>.md  (immutable run snapshots)
 ```
 
 ---
@@ -773,8 +781,9 @@ python main.py --watchlist-file watchlist.txt --screen-rules-file rules.txt --ra
 | **Tier 2** | DuPont Decomposition, Altman Z-Score, Working Capital Cycle, Historical Valuation Band, Quarterly Matrix | ✅ Complete |
 | **Tier 3** | Dividend Dashboard, Capital Allocation Scorecard, Scenario Analysis, ARIMAX, Support/Resistance | ✅ Complete |
 | **Portfolio Tools** | Batch Watchlist Runner, Rule-Based Screener Engine, Portfolio Ranking & Scorecard | ✅ Complete |
+| **Monitoring Tools** | Daily Watchlist Drift Report, Triggered Alert Engine, Re-run Comparison Mode | ✅ Complete |
 
-**Total: 18 feature enhancements + full core system = 30+ analysis modules**
+**Total: 21 feature enhancements + full core system = 30+ analysis modules**
 
 ---
 

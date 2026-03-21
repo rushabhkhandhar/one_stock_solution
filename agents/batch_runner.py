@@ -12,6 +12,7 @@ import os
 import time
 
 from agents.orchestrator import Orchestrator
+from agents.watchlist_insights import WatchlistInsightsEngine
 from config import config
 
 
@@ -68,6 +69,7 @@ class BatchWatchlistRunner:
             raise ValueError("Batch run requires at least one valid symbol")
 
         orchestrator = Orchestrator()
+        insights = WatchlistInsightsEngine(output_dir=config.output_dir)
         items = []
 
         for idx, symbol in enumerate(normalized, start=1):
@@ -75,12 +77,14 @@ class BatchWatchlistRunner:
             print(f"\n[{idx}/{len(normalized)}] {symbol}")
             try:
                 report_path = orchestrator.analyze(symbol)
+                snapshot_path = insights.create_snapshot(symbol, report_path)
                 elapsed = round(time.time() - started_at, 2)
                 items.append({
                     "symbol": symbol,
                     "status": "SUCCESS",
                     "elapsed_sec": elapsed,
                     "report_path": report_path,
+                    "snapshot_path": snapshot_path,
                     "error": "",
                 })
                 print(f"  ✔ Completed in {elapsed:.2f}s")
@@ -91,6 +95,7 @@ class BatchWatchlistRunner:
                     "status": "FAILED",
                     "elapsed_sec": elapsed,
                     "report_path": "",
+                    "snapshot_path": "",
                     "error": str(exc),
                 })
                 print(f"  ✗ Failed in {elapsed:.2f}s: {exc}")
@@ -106,6 +111,27 @@ class BatchWatchlistRunner:
             "items": items,
         }
 
+    def generate_watchlist_insights(self, batch_result: dict) -> dict:
+        insights = WatchlistInsightsEngine(output_dir=config.output_dir)
+        items = batch_result.get("items", [])
+
+        rerun_rows = insights.build_rerun_comparison(items)
+        drift_rows = insights.build_drift_report(rerun_rows)
+        alert_rows = insights.build_alerts(items)
+
+        rerun_path = insights.save_rows_csv(rerun_rows, "rerun_comparison")
+        drift_path = insights.save_rows_csv(drift_rows, "watchlist_drift")
+        alerts_path = insights.save_rows_csv(alert_rows, "watchlist_alerts")
+
+        return {
+            "rerun_comparison_path": rerun_path,
+            "drift_report_path": drift_path,
+            "alerts_path": alerts_path,
+            "rerun_rows": len(rerun_rows),
+            "drift_rows": len(drift_rows),
+            "alert_rows": len(alert_rows),
+        }
+
     def save_summary_csv(self, batch_result: dict, output_dir: str | None = None) -> str:
         if output_dir is None:
             output_dir = config.output_dir
@@ -117,7 +143,7 @@ class BatchWatchlistRunner:
         with open(out_path, "w", encoding="utf-8", newline="") as f:
             writer = csv.DictWriter(
                 f,
-                fieldnames=["symbol", "status", "elapsed_sec", "report_path", "error"],
+                fieldnames=["symbol", "status", "elapsed_sec", "report_path", "snapshot_path", "error"],
             )
             writer.writeheader()
             for item in batch_result.get("items", []):

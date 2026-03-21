@@ -125,6 +125,7 @@ def _run_batch(*, watchlist_file: Optional[str], symbols_csv: Optional[str]) -> 
 
     result = runner.run(symbols)
     summary_path = runner.save_summary_csv(result)
+    insights = runner.generate_watchlist_insights(result)
 
     print("\n" + "═" * 60)
     print("  BATCH SUMMARY")
@@ -133,6 +134,9 @@ def _run_batch(*, watchlist_file: Optional[str], symbols_csv: Optional[str]) -> 
     print(f"  Success : {result['success_count']}")
     print(f"  Failed  : {result['failure_count']}")
     print(f"  Summary : {summary_path}")
+    print(f"  Drift   : {insights['drift_report_path']}")
+    print(f"  Alerts  : {insights['alerts_path']}")
+    print(f"  Compare : {insights['rerun_comparison_path']}")
     print("═" * 60 + "\n")
 
     if result['failure_count'] > 0:
