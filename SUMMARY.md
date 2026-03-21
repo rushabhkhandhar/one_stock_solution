@@ -737,15 +737,29 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-# 2. Run for any Indian listed company
+# 2. Run full research for any Indian listed company
 python main.py RELIANCE
 python main.py TCS
 python main.py "HDFC BANK"
 python main.py AXISCADES
 
-# 3. Output
+# 3. Batch watchlist runner
+python main.py --symbols "RELIANCE,TCS,HDFCBANK"
+python main.py --watchlist-file watchlist.txt
+
+# 4. Rule-based stock screener
+python main.py --symbols "RELIANCE,TCS,HDFCBANK" --screen-rules "pe_ratio<=25,roe>=12,f_score>=6"
+python main.py --watchlist-file watchlist.txt --screen-rules-file rules.txt
+
+# 5. Portfolio ranking and scorecard
+python main.py --watchlist-file watchlist.txt --screen-rules-file rules.txt --rank-metrics "roe:desc,pe_ratio:asc,f_score:desc"
+
+# 6. Output
 # → output/<SYMBOL>_Research_<DATE>.md   (Markdown report)
 # → output/<SYMBOL>_Research_<DATE>.pdf  (PDF report)
+# → output/watchlist_batch_summary_<TIMESTAMP>.csv
+# → output/screener_results_<TIMESTAMP>.csv
+# → output/portfolio_scorecard_<TIMESTAMP>.csv
 ```
 
 ---
@@ -758,8 +772,9 @@ python main.py AXISCADES
 | **Tier 1** | Delivery Volume, Shareholding Tracker, Results Calendar, Price Target Recon, PEG Ratio | ✅ Complete |
 | **Tier 2** | DuPont Decomposition, Altman Z-Score, Working Capital Cycle, Historical Valuation Band, Quarterly Matrix | ✅ Complete |
 | **Tier 3** | Dividend Dashboard, Capital Allocation Scorecard, Scenario Analysis, ARIMAX, Support/Resistance | ✅ Complete |
+| **Portfolio Tools** | Batch Watchlist Runner, Rule-Based Screener Engine, Portfolio Ranking & Scorecard | ✅ Complete |
 
-**Total: 15 feature enhancements + full core system = 30+ analysis modules**
+**Total: 18 feature enhancements + full core system = 30+ analysis modules**
 
 ---
 
