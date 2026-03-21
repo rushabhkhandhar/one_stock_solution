@@ -148,9 +148,10 @@ class DCFModel:
             projected_fcf = []
             pv_fcf        = []
             n = self.m.projection_years
+            fcf_prev = latest_fcf
             for yr in range(1, n + 1):
                 yr_growth = growth_rate - (growth_rate - terminal_g) * (yr / n)
-                fcf_proj  = latest_fcf * (1 + yr_growth) ** yr
+                fcf_proj  = fcf_prev * (1 + yr_growth)
                 # Guard against negative projected FCFs (e.g. from
                 # very negative growth rates). Floor at zero — we
                 # don't give credit for value-destroying cash flows.
@@ -159,6 +160,7 @@ class DCFModel:
                 pv        = fcf_proj / (1 + wacc) ** yr
                 projected_fcf.append(fcf_proj)
                 pv_fcf.append(pv)
+                fcf_prev = fcf_proj
 
             # ── Step 1 result: PV of projected FCFs ──────
             pv_of_fcf_total = sum(pv_fcf)
@@ -274,7 +276,7 @@ class DCFModel:
         return pp.get(cf, 'investing_cf')
 
     def _estimate_growth(self, series: pd.Series) -> float:
-        """CAGR of a positive-only series, clamped to [-10 %, 30 %]."""
+        """CAGR of a positive-only series."""
         s = series.dropna()
         if len(s) < 2:
             return None  # Insufficient data — no fallback
@@ -333,7 +335,8 @@ class DCFModel:
         debt_val   = borrowings if not np.isnan(borrowings) else 0
         if equity_val <= 0:
             # Negative equity — use 100% equity cost (Ke) as WACC
-            wacc = ke * (1 - tax_rate)
+            # Tax shield applies only to debt component, not equity.
+            wacc = ke
             return wacc  # No artificial floor — real computation stands
 
         total = equity_val + debt_val
@@ -358,8 +361,8 @@ class DCFModel:
         if not tax_pct_series.empty:
             # Tax% from screener is in decimal (0.25 = 25%) or percentage
             rates = []
-            for i in range(min(3, len(tax_pct_series))):
-                val = get_value(tax_pct_series, i)
+            for i in range(1, min(3, len(tax_pct_series)) + 1):
+                val = get_value(tax_pct_series, -i)
                 if not np.isnan(val):
                     # screener.in reports as fraction (0.22, 0.24, etc.)
                     rate = val if val < 1.0 else val / 100.0
@@ -373,9 +376,10 @@ class DCFModel:
         pbt_series = pp.get(pnl, 'pbt')
         if not tax_series.empty and not pbt_series.empty:
             rates = []
-            for i in range(min(3, len(tax_series))):
-                tax_val = get_value(tax_series, i)
-                pbt_val = get_value(pbt_series, i)
+            lookback = min(3, len(tax_series), len(pbt_series))
+            for i in range(1, lookback + 1):
+                tax_val = get_value(tax_series, -i)
+                pbt_val = get_value(pbt_series, -i)
                 if (not np.isnan(tax_val) and not np.isnan(pbt_val)
                         and pbt_val > 0 and tax_val >= 0):
                     rate = tax_val / pbt_val
@@ -446,9 +450,12 @@ class DCFModel:
                     row.append(None)   # Invalid: WACC ≤ TGR
                     continue
                 projected = []
+                fcf_prev = latest_fcf
                 for yr in range(1, n + 1):
                     yr_g = growth_rate - (growth_rate - tgr) * (yr / n)
-                    projected.append(latest_fcf * (1 + yr_g) ** yr)
+                    fcf_proj = fcf_prev * (1 + yr_g)
+                    projected.append(fcf_proj)
+                    fcf_prev = fcf_proj
                 pv_sum = sum(f / (1 + wacc) ** (i + 1)
                              for i, f in enumerate(projected))
                 tv = projected[-1] * (1 + tgr) / (wacc - tgr)

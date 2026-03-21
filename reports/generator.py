@@ -733,6 +733,49 @@ class ReportGenerator:
                 else:
                     a("\n")
 
+        # ── Investment Committee Pack ───────────────────────
+        ic_pack = analysis.get('investment_committee_pack', {})
+        if ic_pack.get('available'):
+            a("## 🗂️ Investment Committee Pack\n")
+            a("### Decision Snapshot\n")
+            a(f"- **Recommendation:** {ic_pack.get('recommendation', 'N/A')}")
+            a(f"- **Confidence:** {ic_pack.get('confidence', 'N/A')}")
+            a(f"- **Horizon:** {ic_pack.get('horizon', 'N/A')}")
+
+            w_target = ic_pack.get('weighted_target')
+            w_upside = ic_pack.get('weighted_upside_pct')
+            c_price = ic_pack.get('current_price')
+            if w_target is not None:
+                if w_upside is not None and c_price is not None:
+                    a(f"- **Weighted Target:** ₹{w_target:,.2f} ({w_upside:+.1f}% vs current ₹{c_price:,.2f})")
+                else:
+                    a(f"- **Weighted Target:** ₹{w_target:,.2f}")
+            a("")
+
+            a("### Concise Bull / Base / Bear Cases\n")
+            for case in ic_pack.get('cases', []):
+                line = case.get('concise_line', '').strip()
+                if line:
+                    a(f"- {line}")
+            a("")
+
+            card = ic_pack.get('decision_card', {})
+            if card:
+                a("### Decision Card\n")
+                a("| Lens | Vote |")
+                a("|------|------|")
+                a(f"| Valuation | {card.get('valuation_vote', 'N/A')} |")
+                a(f"| Quality | {card.get('quality_vote', 'N/A')} |")
+                a(f"| Momentum | {card.get('momentum_vote', 'N/A')} |")
+                a(f"| Macro | {card.get('macro_vote', 'N/A')} |")
+                a("")
+                a(f"> **Net Bias:** {card.get('net_bias', 'N/A')} "
+                  f"(Bull votes: {card.get('bull_votes', 0)}, "
+                  f"Bear votes: {card.get('bear_votes', 0)})\n")
+        elif ic_pack.get('reason'):
+            a("## 🗂️ Investment Committee Pack\n")
+            a(f"> ⚠️ IC pack unavailable — {ic_pack.get('reason')}\n")
+
         # ── DCF Valuation ────────────────────────────────────
         a("## 💰 Valuation Analysis — DCF Model\n")
         if is_suspended:
@@ -1056,6 +1099,58 @@ class ReportGenerator:
                     name = p.get('name', p.get('ticker', '?'))
                     a(f"| {name} | {mcap_v} | {pe_v} | {ev_v} | {roe_v} | {dy_v} |")
                 a("")
+
+        # ── Sector/Industry Benchmarking Dashboard ─────────
+        sector_benchmark = analysis.get('sector_benchmark', {})
+        if sector_benchmark.get('available'):
+            a("## 🧭 Sector & Industry Benchmarking Dashboard\n")
+            a(f"**Context:** {sector_benchmark.get('sector', 'N/A')} "
+              f"({sector_benchmark.get('industry', 'N/A')}) with "
+              f"{sector_benchmark.get('peer_count', 0)} peers\n")
+
+            score = sector_benchmark.get('benchmark_score')
+            verdict = sector_benchmark.get('benchmark_verdict', 'N/A')
+            tier = sector_benchmark.get('stock_mcap_tier', 'N/A')
+            if score is not None:
+                a(f"**Benchmark Score:** {score:.2f}/100  \n"
+                  f"**Verdict:** {verdict}  \n"
+                  f"**Market-Cap Tier:** {tier}\n")
+            else:
+                a(f"**Verdict:** {verdict}  \n"
+                  f"**Market-Cap Tier:** {tier}\n")
+
+            metric_labels = {
+                'pe': 'P/E',
+                'ev_ebitda': 'EV/EBITDA',
+                'market_cap_cr': 'Market Cap',
+                'roe': 'ROE',
+                'dividend_yield': 'Dividend Yield',
+            }
+
+            a("| Metric | Stock Value | Peer Sample | Direction | Percentile |")
+            a("|--------|------------:|------------:|-----------|-----------:|")
+            for row in sector_benchmark.get('rows', []):
+                metric_key = row.get('metric', '')
+                metric = metric_labels.get(metric_key, metric_key)
+                value = row.get('stock_value')
+                if value is None:
+                    value_s = 'N/A'
+                elif metric_key in ('pe', 'ev_ebitda'):
+                    value_s = f"{value:.1f}x"
+                elif metric_key == 'market_cap_cr':
+                    value_s = f"₹{value:,.0f} Cr"
+                else:
+                    value_s = f"{value:.2f}%"
+
+                direction = row.get('direction', 'N/A').replace('_', ' ')
+                percentile = row.get('percentile')
+                percentile_s = f"{percentile:.1f}%" if percentile is not None else 'N/A'
+                sample = row.get('peer_count', 0)
+                a(f"| {metric} | {value_s} | {sample} | {direction} | {percentile_s} |")
+            a("")
+        elif sector_benchmark.get('reason'):
+            a("## 🧭 Sector & Industry Benchmarking Dashboard\n")
+            a(f"> ⚠️ Benchmarking unavailable — {sector_benchmark.get('reason')}\n")
 
         # ── Forensic Analysis ────────────────────────────────
         a("## 🔍 Forensic Analysis — Beneish M-Score\n")

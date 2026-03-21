@@ -20,7 +20,7 @@ python main.py RELIANCE
 7. [Extended Quantitative Analysis (Phase 3)](#7-extended-quantitative-analysis-phase-3)
 8. [Tier 1 Features (Features 1–5)](#8-tier-1-features-features-1-5)
 9. [Tier 2 Features (Features 6–10)](#9-tier-2-features-features-6-10)
-10. [Tier 3 Features (Features 11–15)](#10-tier-3-features-features-11-15)
+10. [Tier 3 Features (Features 11–17)](#10-tier-3-features-features-11-17)
 11. [Forensic Deep-Dive (Phase 3.5–3.9)](#11-forensic-deep-dive-phase-35-39)
 12. [Qualitative Intelligence (Phase 4)](#12-qualitative-intelligence-phase-4)
 13. [Technical & Predictive (Phase 5)](#13-technical--predictive-phase-5)
@@ -58,7 +58,7 @@ main.py
         ├── Phase 2   → Core Quant (Ratios, DCF, M-Score, F-Score)
         ├── Phase 2.5 → Annual Report Download & Validation
         ├── Phase 2.6 → Layout-Aware Table Extraction (BRSR, Segmental)
-        ├── Phase 3   → Extended Quant (Peers, Trends, CFO/EBITDA)
+        ├── Phase 3   → Extended Quant (Peers, Trends, CFO/EBITDA, Sector Benchmarking)
         │   ├── Phase 3.4 → Tier 2 Analytics (DuPont, Altman, WCC, ValBand, QtrMatrix)
         │   └── Phase 3.7 → Tier 3 Analytics (Dividend, CapAlloc, Scenario)
         ├── Phase 3.5 → Forensic Deep Dive (RPT, Contingent, Auditor)
@@ -66,7 +66,7 @@ main.py
         ├── Phase 3.9 → Forensic Dashboard (Unified Earnings Quality)
         ├── Phase 4   → Qualitative (Moat, Text Intel, Say-Do Tracker)
         ├── Phase 5   → Technical & Predictive (Technicals, ARIMA, ARIMAX, Macro)
-        ├── Phase 6   → Synthesis (BUY / HOLD / SELL / SUSPENDED)
+        ├── Phase 6   → Synthesis + IC Pack (BUY / HOLD / SELL / SUSPENDED)
         └── Phase 7   → Report Generation (Markdown + PDF)
 ```
 
@@ -112,12 +112,12 @@ screenerScraper.py   →   data/ingestion.py   →   data/preprocessing.py   →
 | **2** | Core Quant | Financial ratios (20+), DCF valuation, Beneish M-Score, Piotroski F-Score |
 | **2.5** | AR Download | Download latest Annual Report PDFs from BSE, extract structured data (tables, footnotes, auditor observations) |
 | **2.6** | Layout Parsing | Layout-aware table extraction — BRSR/ESG tables, segmental revenue, notes to accounts |
-| **3** | Extended Quant | CFO/EBITDA quality, Peer CCA, 5Y Trends, Tier 1 features, Tier 2 features, Tier 3 features |
+| **3** | Extended Quant | CFO/EBITDA quality, Peer CCA, Sector/Industry benchmarking dashboard, 5Y Trends, Tier 1 features, Tier 2 features, Tier 3 features |
 | **3.5–3.9** | Forensics | RPT extraction, contingent liabilities, auditor red flags, unified forensic dashboard |
 | **3.6** | Segmental + SOTP | Segment-wise breakdown, Sum-of-the-Parts valuation, governance scoring, ESG/BRSR |
 | **4** | Qualitative | Moat identification, text intelligence (keyword NLP), say-do management credibility tracker |
 | **5** | Technical & Predictive | Technical analysis (trend, momentum, volume, volatility, S/R levels), ARIMA+ETS+GARCH ensemble, ARIMAX with macro regressors, flow correlation, macro-ARDL |
-| **6** | Synthesis | Equal-weight voting across 17+ signals → BUY / HOLD / SELL / SUSPENDED |
+| **6** | Synthesis | Equal-weight voting across 17+ signals + investment-committee pack → BUY / HOLD / SELL / SUSPENDED |
 | **7** | Report + PDF | Full Markdown report (2600+ lines template), PDF export with professional styling |
 
 ---
@@ -259,6 +259,18 @@ Validates operating cash flow against EBITDA to detect earnings quality issues:
 - CFO/EBITDA ratio < 0.5 → red flag
 - Persistent divergence over 3+ years → structural concern
 
+### 7.4 Sector & Industry Benchmarking Dashboard — `quant/sector_benchmark_dashboard.py`
+
+**Class:** `SectorBenchmarkDashboard`
+
+- Computes percentile context for the analyzed stock against dynamically discovered peers.
+- Uses existing peer + ratio outputs (no hardcoded peer sets): P/E, EV/EBITDA, market cap, ROE, dividend yield.
+- Produces a composite benchmark score (0-100) and quartile verdict:
+  - `TOP_QUARTILE`
+  - `ABOVE_MEDIAN`
+  - `BELOW_MEDIAN`
+  - `BOTTOM_QUARTILE`
+
 ---
 
 ## 8. Tier 1 Features (Features 1–5)
@@ -287,7 +299,7 @@ All implemented in `quant/tier2_analytics.py` (686 lines):
 
 ---
 
-## 10. Tier 3 Features (Features 11–15)
+## 10. Tier 3 Features (Features 11–17)
 
 ### Feature 11 — Dividend Dashboard
 
@@ -360,6 +372,30 @@ Three complementary methods:
 | **Price Congestion Zones** | Histogram clustering of recent prices (up to 500 bars). Top 5 zones by frequency, classified as SUPPORT or RESISTANCE relative to current price |
 
 **Summary output:** `key_supports` (nearest first, descending) and `key_resistances` (nearest first, ascending) aggregated from all three methods with source labels.
+
+### Feature 16 — Sector & Industry Benchmarking Dashboard
+
+**Module:** `quant/sector_benchmark_dashboard.py` → `SectorBenchmarkDashboard`
+
+| Metric | Direction Rule | Output |
+|--------|----------------|--------|
+| P/E | Lower is better | Peer percentile rank |
+| EV/EBITDA | Lower is better | Peer percentile rank |
+| Market Cap | Higher is better | Peer percentile rank |
+| ROE | Higher is better | Peer percentile rank |
+| Dividend Yield | Higher is better | Peer percentile rank |
+
+- Composite **benchmark score** = average percentile across available metrics.
+- Verdict buckets: TOP_QUARTILE / ABOVE_MEDIAN / BELOW_MEDIAN / BOTTOM_QUARTILE.
+
+### Feature 17 — Investment Committee Pack Mode
+
+**Module:** `agents/investment_committee_pack.py` → `InvestmentCommitteePack`
+
+- Builds concise bull/base/bear case lines directly from computed scenario outputs.
+- Adds an IC decision card with independent votes from valuation, quality, momentum, and macro signals.
+- Produces a net bias (`BULLISH`, `BEARISH`, or `BALANCED`) for committee discussion.
+- Integrated into the single-run report and PDF generation flow.
 
 ---
 
@@ -657,6 +693,11 @@ screener-scraper/
 │
 ├── agents/
 │   ├── orchestrator.py              # 7-phase pipeline controller (1171 lines)
+│   ├── batch_runner.py              # Batch watchlist execution + snapshot support
+│   ├── screener_engine.py           # Rule-based stock screener engine
+│   ├── portfolio_scorecard.py       # Portfolio ranking and scorecard
+│   ├── watchlist_insights.py        # Drift report, alerts, rerun comparison
+│   ├── investment_committee_pack.py # IC pack builder (bull/base/bear + decision card)
 │   ├── synthesis_agent.py           # Equal-weight BUY/HOLD/SELL voting (347 lines)
 │   └── rag_agent.py                 # RAG retrieval agent
 │
@@ -682,6 +723,7 @@ screener-scraper/
 │   ├── trend_analyzer.py            # 5Y trends for 11 metrics
 │   ├── technicals.py                # Technical analysis + S/R levels (708 lines)
 │   ├── sotp.py                      # Sum-of-the-Parts valuation
+│   ├── sector_benchmark_dashboard.py # Sector/industry percentile benchmarking
 │   ├── tier2_analytics.py           # Tier 2: DuPont, Altman, WCC, ValBand, QtrMatrix (686 lines)
 │   └── tier3_analytics.py           # Tier 3: Dividend, CapAlloc, Scenario (546 lines)
 │
@@ -779,12 +821,12 @@ python main.py --watchlist-file watchlist.txt --screen-rules-file rules.txt --ra
 | **Core** | Data ingestion, Ratios, DCF, M-Score, F-Score, AR Parsing, Peer CCA, Trends, Technicals, Forensics, Governance, ESG, Moat, NLP, Synthesis, Report | ✅ Complete |
 | **Tier 1** | Delivery Volume, Shareholding Tracker, Results Calendar, Price Target Recon, PEG Ratio | ✅ Complete |
 | **Tier 2** | DuPont Decomposition, Altman Z-Score, Working Capital Cycle, Historical Valuation Band, Quarterly Matrix | ✅ Complete |
-| **Tier 3** | Dividend Dashboard, Capital Allocation Scorecard, Scenario Analysis, ARIMAX, Support/Resistance | ✅ Complete |
+| **Tier 3** | Dividend Dashboard, Capital Allocation Scorecard, Scenario Analysis, ARIMAX, Support/Resistance, Sector Benchmarking, IC Pack Mode | ✅ Complete |
 | **Portfolio Tools** | Batch Watchlist Runner, Rule-Based Screener Engine, Portfolio Ranking & Scorecard | ✅ Complete |
 | **Monitoring Tools** | Daily Watchlist Drift Report, Triggered Alert Engine, Re-run Comparison Mode | ✅ Complete |
 
-**Total: 21 feature enhancements + full core system = 30+ analysis modules**
+**Total: 23 feature enhancements + full core system = 30+ analysis modules**
 
 ---
 
-*Generated on 19 February 2026. System runs entirely on publicly available data with zero API keys required for core analysis.*
+*Generated on 21 March 2026. System runs entirely on publicly available data with zero API keys required for core analysis.*

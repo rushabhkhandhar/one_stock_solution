@@ -72,6 +72,28 @@ class WatchlistInsightsEngine:
         target_price = self._extract_table_currency(text, "Target Price (DCF)")
         current_price = self._extract_table_currency(text, "Current Price")
         upside_pct = self._extract_table_percent(text, "Upside / Downside")
+
+        # Fallback to scenario weighted-target block when DCF table values
+        # are unavailable (common for non-DCF or data-limited runs).
+        weighted = self._extract_weighted_target_triplet(text)
+        if weighted is not None:
+            w_target, w_upside, w_current = weighted
+            if target_price is None:
+                target_price = w_target
+            if upside_pct is None:
+                upside_pct = w_upside
+            if current_price is None:
+                current_price = w_current
+
+        # Final fallback: use consensus reconciliation row if available.
+        consensus = self._extract_consensus_target_upside(text)
+        if consensus is not None:
+            c_target, c_upside = consensus
+            if target_price is None:
+                target_price = c_target
+            if upside_pct is None:
+                upside_pct = c_upside
+
         trend_signal = self._extract_table_text(text, "Trend Signal")
 
         risk_section = self._extract_section(text, "## ⚠️ Risk Factors & Red Flags")
@@ -204,7 +226,7 @@ class WatchlistInsightsEngine:
                 drift_status = "DOWNGRADE"
             elif row.get("technical_changed"):
                 drift_status = "TECHNICAL_SHIFT"
-            elif row.get("upside_delta_pp") not in ("", None):
+            elif row.get("upside_delta_pp") not in ("", None) and abs(float(row.get("upside_delta_pp"))) > 0:
                 drift_status = "VALUATION_DRIFT"
             else:
                 drift_status = "UNCHANGED"
@@ -335,7 +357,10 @@ class WatchlistInsightsEngine:
 
     @staticmethod
     def _extract_table_currency(text: str, label: str) -> Optional[float]:
-        pattern = re.compile(rf"\|\s*\*\*{re.escape(label)}\*\*\s*\|\s*([^|]+)\|", re.IGNORECASE)
+        pattern = re.compile(
+            rf"\|\s*(?:\*\*)?{re.escape(label)}(?:\*\*)?\s*\|\s*([^|\n]+)\|",
+            re.IGNORECASE,
+        )
         m = pattern.search(text)
         if not m:
             return None
@@ -343,7 +368,10 @@ class WatchlistInsightsEngine:
 
     @staticmethod
     def _extract_table_percent(text: str, label: str) -> Optional[float]:
-        pattern = re.compile(rf"\|\s*\*\*{re.escape(label)}\*\*\s*\|\s*([^|]+)\|", re.IGNORECASE)
+        pattern = re.compile(
+            rf"\|\s*(?:\*\*)?{re.escape(label)}(?:\*\*)?\s*\|\s*([^|\n]+)\|",
+            re.IGNORECASE,
+        )
         m = pattern.search(text)
         if not m:
             return None
@@ -358,6 +386,38 @@ class WatchlistInsightsEngine:
         value = m.group(1)
         value = value.replace("*", "").strip()
         return value or None
+
+    @staticmethod
+    def _extract_weighted_target_triplet(text: str) -> Optional[tuple[float, float, float]]:
+        pattern = re.compile(
+            r"Probability-Weighted\s+Target:\s*₹\s*([0-9,]+(?:\.\d+)?)\*\*"
+            r"(?:\s*\n)?\s*\(\s*([+-]?\d+(?:\.\d+)?)%\s*from\s*current\s*₹\s*([0-9,]+(?:\.\d+)?)\s*\)",
+            re.IGNORECASE,
+        )
+        m = pattern.search(text)
+        if not m:
+            return None
+        target = WatchlistInsightsEngine._parse_float(m.group(1))
+        upside = WatchlistInsightsEngine._parse_float(m.group(2))
+        current = WatchlistInsightsEngine._parse_float(m.group(3))
+        if target is None or upside is None or current is None:
+            return None
+        return target, upside, current
+
+    @staticmethod
+    def _extract_consensus_target_upside(text: str) -> Optional[tuple[float, float]]:
+        pattern = re.compile(
+            r"\|\s*\*\*Consensus\s*\(Average\)\*\*\s*\|\s*\*\*₹\s*([^|*]+)\*\*\s*\|\s*\*\*([+-]?\d+(?:\.\d+)?)%\*\*\s*\|",
+            re.IGNORECASE,
+        )
+        m = pattern.search(text)
+        if not m:
+            return None
+        target = WatchlistInsightsEngine._parse_float(m.group(1))
+        upside = WatchlistInsightsEngine._parse_float(m.group(2))
+        if target is None or upside is None:
+            return None
+        return target, upside
 
     @staticmethod
     def _extract_section(text: str, heading: str) -> str:

@@ -39,6 +39,7 @@ from quant.trend_analyzer import TrendAnalyzer
 from quant.technicals import TechnicalAnalyzer
 from quant.sotp import SOTPModel
 from quant.forensic_dashboard import ForensicDashboard
+from quant.sector_benchmark_dashboard import SectorBenchmarkDashboard
 from quant.tier2_analytics import (
     DuPontAnalysis, AltmanZScore, WorkingCapitalTrend,
     HistoricalValuationBand, QuarterlyPerformanceMatrix)
@@ -48,6 +49,7 @@ from predictive.arima_ets import HybridPredictor
 from predictive.flow_correlation import FlowCorrelation
 from predictive.macro_engine import MacroCorrelationEngine
 from agents.synthesis_agent import SynthesisAgent
+from agents.investment_committee_pack import InvestmentCommitteePack
 from compliance.cross_validator import CrossValidator
 from compliance.safety import KillSwitch, stamp_source
 from qualitative.moat_identifier import MoatIdentifier
@@ -80,12 +82,14 @@ class Orchestrator:
         self.text_intel       = TextIntelligenceEngine()
         self.sotp_model       = SOTPModel()
         self.forensic_dash    = ForensicDashboard()
+        self.sector_benchmark = SectorBenchmarkDashboard()
         self.say_do_tracker   = SayDoTracker()
         self.macro_engine     = MacroCorrelationEngine()
         self.layout_parser    = LayoutAwareParser()
         self.predictor        = HybridPredictor()
         self.flow_corr        = FlowCorrelation()
         self.synthesis        = SynthesisAgent()
+        self.ic_pack_builder  = InvestmentCommitteePack()
         self.cross_validator  = CrossValidator()
         self.kill_switch      = KillSwitch()
         self.feeds            = RealtimeFeeds()
@@ -289,6 +293,19 @@ class Orchestrator:
             mcap_tier = analysis['peer_cca'].get('stock_mcap_tier', '')
             if mcap_tier:
                 print(f"    Market Cap Tier: {mcap_tier}")
+
+        # Sector + Industry Benchmarking Dashboard
+        print("  ▸ Sector & Industry Benchmarking Dashboard …")
+        try:
+            analysis['sector_benchmark'] = self.sector_benchmark.analyze(analysis)
+            sb = analysis['sector_benchmark']
+            if sb.get('available'):
+                print(f"  ✔ Benchmark Score: {sb.get('benchmark_score', 'N/A')} "
+                      f"({sb.get('benchmark_verdict', 'N/A')})")
+            else:
+                print(f"  ⚠ Benchmark Dashboard: {sb.get('reason', 'N/A')}")
+        except Exception as e:
+            analysis['sector_benchmark'] = {'available': False, 'reason': str(e)}
 
         # 5-Year Trend Analysis
         print("  ▸ 5-Year Trend Analysis …")
@@ -819,6 +836,23 @@ class Orchestrator:
         rec = analysis['rating'].get('recommendation', 'N/A')
         conf = analysis['rating'].get('confidence', '')
         print(f"  ✔ Rating: {rec} (confidence: {conf})")
+
+        # Investment Committee Pack (concise bull/base/bear)
+        print("  ▸ Investment Committee Pack …")
+        try:
+            analysis['investment_committee_pack'] = self.ic_pack_builder.build(analysis)
+            icp = analysis['investment_committee_pack']
+            if icp.get('available'):
+                wt = icp.get('weighted_target')
+                wu = icp.get('weighted_upside_pct')
+                if wt is not None and wu is not None:
+                    print(f"  ✔ IC Pack: Weighted Target ₹{wt:,.2f} ({wu:+.1f}%)")
+                else:
+                    print("  ✔ IC Pack: Generated")
+            else:
+                print(f"  ⚠ IC Pack: {icp.get('reason', 'N/A')}")
+        except Exception as e:
+            analysis['investment_committee_pack'] = {'available': False, 'reason': str(e)}
 
         # ── Phase 7: Report ──────────────────────────────────
         print("\n📝  PHASE 7 — Report Generation")
